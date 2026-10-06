@@ -17,3 +17,11 @@ uploads/
 *.tar.gz
 *.tsbuildinfo
 __pycache__/
+
+# Local source backups
+*.pre-*
+*.pre_*
+*.before-*
+*.before_*
+*.backup*
+*.bak
