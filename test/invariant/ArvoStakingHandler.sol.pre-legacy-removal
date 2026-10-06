@@ -1,0 +1,147 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { ArvoStakingTypes } from "../../src/ArvoStakingTypes.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+
+contract ArvoStakingHandler is Test {
+    ArvoStaking public staking;
+    MockERC20 public arvo;
+    MockERC20 public usdc;
+
+    address public admin;
+
+    address[] internal users;
+
+    constructor(ArvoStaking staking_, MockERC20 arvo_, MockERC20 usdc_, address admin_) {
+        staking = staking_;
+        arvo = arvo_;
+        usdc = usdc_;
+        admin = admin_;
+
+        users.push(address(0x1001));
+        users.push(address(0x1002));
+        users.push(address(0x1003));
+        users.push(address(0x1004));
+
+        for (uint256 i = 0; i < users.length; i++) {
+            arvo.mint(users[i], 10_000_000 ether);
+            usdc.mint(users[i], 10_000_000e6);
+
+            vm.startPrank(users[i]);
+            arvo.approve(address(staking), type(uint256).max);
+            usdc.approve(address(staking), type(uint256).max);
+            vm.stopPrank();
+        }
+    }
+
+    function stakeArvo(uint256 userSeed, uint256 amountSeed, uint256 vaultSeed) external {
+        address user = users[userSeed % users.length];
+
+        uint256 amount = bound(amountSeed, 1_000 ether, 100_000 ether);
+
+        uint8 vaultId = uint8(vaultSeed % 4);
+
+        vm.prank(user);
+
+        try staking.stake(
+            vaultId, ArvoStakingTypes.StakeMode.ARVO, ArvoStakingTypes.RewardMode.ARVO, amount, 0
+        ) { }
+            catch { }
+    }
+
+    function stakeUsdc(uint256 userSeed, uint256 amountSeed, uint256 vaultSeed) external {
+        address user = users[userSeed % users.length];
+
+        uint256 amount = bound(amountSeed, 1_000e6, 100_000e6);
+
+        uint8 vaultId = uint8(vaultSeed % 4);
+
+        vm.prank(user);
+
+        try staking.stake(
+            vaultId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, amount
+        ) { }
+            catch { }
+    }
+
+    function stakeDual(uint256 userSeed, uint256 arvoSeed, uint256 usdcSeed, uint256 vaultSeed)
+        external
+    {
+        address user = users[userSeed % users.length];
+
+        uint256 arvoAmount = bound(arvoSeed, 1_000 ether, 100_000 ether);
+
+        uint256 usdcAmount = bound(usdcSeed, 1_000e6, 100_000e6);
+
+        uint8 vaultId = uint8(vaultSeed % 4);
+
+        vm.prank(user);
+
+        try staking.stake(
+            vaultId,
+            ArvoStakingTypes.StakeMode.DUAL,
+            ArvoStakingTypes.RewardMode.MIXED,
+            arvoAmount,
+            usdcAmount
+        ) { }
+            catch { }
+    }
+
+    function fundArvo(uint256 amountSeed) external {
+        uint256 amount = bound(amountSeed, 1 ether, 1_000_000 ether);
+
+        arvo.mint(admin, amount);
+
+        vm.startPrank(admin);
+        arvo.approve(address(staking), amount);
+
+        try staking.fundArvoRewards(amount) { } catch { }
+
+        vm.stopPrank();
+    }
+
+    function fundUsdc(uint256 amountSeed) external {
+        uint256 amount = bound(amountSeed, 1e6, 1_000_000e6);
+
+        usdc.mint(admin, amount);
+
+        vm.startPrank(admin);
+        usdc.approve(address(staking), amount);
+
+        try staking.fundUsdcRewards(amount) { } catch { }
+
+        vm.stopPrank();
+    }
+
+    function withdrawArvoSurplus(uint256 amountSeed) external {
+        uint256 available = staking.availableArvoRewardCapacity();
+
+        if (available == 0) {
+            return;
+        }
+
+        uint256 amount = bound(amountSeed, 1, available);
+
+        vm.prank(admin);
+
+        try staking.withdrawArvoSurplus(admin, amount) { } catch { }
+    }
+
+    function withdrawUsdcSurplus(uint256 amountSeed) external {
+        uint256 available = staking.availableUsdcRewardCapacity();
+
+        if (available == 0) {
+            return;
+        }
+
+        uint256 amount = bound(amountSeed, 1, available);
+
+        vm.prank(admin);
+
+        try staking.withdrawUsdcSurplus(admin, amount) { } catch { }
+    }
+}

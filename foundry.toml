@@ -1,0 +1,37 @@
+[profile.default]
+src = "src"
+test = "test"
+script = "script"
+out = "out"
+libs = ["lib"]
+
+solc_version = "0.8.35"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 1
+via_ir = true
+
+ffi = true
+ast = true
+build_info = true
+extra_output = ["storageLayout"]
+
+fs_permissions = [
+    { access = "read-write", path = "./" }
+]
+
+[fuzz]
+runs = 2000
+
+[invariant]
+runs = 512
+depth = 100
+fail_on_revert = false
+
+[rpc_endpoints]
+robinhood_testnet = "${RH_TESTNET_RPC}"
+
+[fmt]
+line_length = 100
+tab_width = 4
+bracket_spacing = true

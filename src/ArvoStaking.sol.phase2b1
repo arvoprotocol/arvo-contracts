@@ -1,0 +1,672 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Initializable } from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {
+    AccessControlUpgradeable
+} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {
+    PausableUpgradeable
+} from "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
+import { ReentrancyGuard } from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {
+    UUPSUpgradeable
+} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import { SafeERC20 } from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
+
+import { ArvoStakingTypes } from "./ArvoStakingTypes.sol";
+import { ArvoVaultDefaults } from "./ArvoVaultDefaults.sol";
+
+contract ArvoStaking is
+    Initializable,
+    AccessControlUpgradeable,
+    PausableUpgradeable,
+    ReentrancyGuard,
+    UUPSUpgradeable
+{
+    using SafeERC20 for IERC20;
+    using SafeCast for uint256;
+
+    uint256 public constant BPS = 10_000;
+
+    bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
+
+    bytes32 public constant VAULT_MANAGER_ROLE = keccak256("VAULT_MANAGER_ROLE");
+
+    bytes32 public constant REWARD_MANAGER_ROLE = keccak256("REWARD_MANAGER_ROLE");
+
+    bytes32 public constant UPGRADER_ROLE = keccak256("UPGRADER_ROLE");
+
+    IERC20 public arvo;
+    IERC20 public usdc;
+
+    uint256 public nextPositionId;
+
+    mapping(uint32 => ArvoStakingTypes.VaultConfig) private _vaults;
+
+    mapping(uint32 => bool) private _vaultExists;
+
+    uint32 public nextVaultId;
+
+    mapping(uint256 => ArvoStakingTypes.Position) private _positions;
+
+    mapping(address => uint256[]) private _userPositionIds;
+
+    /*
+     * Principal liabilities are assets belonging to stakers.
+     * They must never be considered protocol reward capital.
+     */
+    uint256 public arvoPrincipalLiability;
+    uint256 public usdcPrincipalLiability;
+
+    /*
+     * Reward liabilities are rewards already promised to open positions.
+     */
+    uint256 public arvoRewardLiability;
+    uint256 public usdcRewardLiability;
+
+    /*
+     * Used to enforce optional per-vault capacities.
+     */
+    mapping(uint32 => uint256) public vaultArvoPrincipal;
+    mapping(uint32 => uint256) public vaultUsdcPrincipal;
+
+    event RewardReserveFunded(address indexed token, address indexed funder, uint256 amount);
+
+    event Staked(
+        uint256 indexed positionId,
+        address indexed user,
+        uint32 indexed vaultId,
+        ArvoStakingTypes.StakeMode stakeMode,
+        ArvoStakingTypes.RewardMode rewardMode,
+        uint256 arvoPrincipal,
+        uint256 usdcPrincipal,
+        uint256 arvoReward,
+        uint256 usdcReward,
+        uint256 maturesAt
+    );
+
+    event VaultConfigured(uint32 indexed vaultId);
+    event VaultCreated(uint32 indexed vaultId);
+
+    event SurplusWithdrawn(address indexed token, address indexed recipient, uint256 amount);
+
+    error ZeroAddress();
+    error InvalidAmount();
+    error InvalidVault();
+    error VaultDisabled();
+    error StakeModeDisabled();
+    error RewardModeDisabled();
+    error BelowMinimum();
+    error CapacityExceeded();
+    error InsufficientRewardReserve();
+    error InvalidConfiguration();
+    error InsufficientSurplus();
+    error UnexpectedTokenTransfer();
+
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
+    }
+
+    function initialize(address arvoToken, address usdcToken, address admin) external initializer {
+        if (arvoToken == address(0) || usdcToken == address(0) || admin == address(0)) {
+            revert ZeroAddress();
+        }
+
+        if (arvoToken == usdcToken || arvoToken.code.length == 0 || usdcToken.code.length == 0) {
+            revert InvalidConfiguration();
+        }
+
+        __AccessControl_init();
+        __Pausable_init();
+
+        arvo = IERC20(arvoToken);
+        usdc = IERC20(usdcToken);
+
+        nextPositionId = 1;
+
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(PAUSER_ROLE, admin);
+        _grantRole(VAULT_MANAGER_ROLE, admin);
+        _grantRole(REWARD_MANAGER_ROLE, admin);
+        _grantRole(UPGRADER_ROLE, admin);
+
+        _vaults[0] = ArvoVaultDefaults.build();
+        _vaults[1] = ArvoVaultDefaults.advance();
+        _vaults[2] = ArvoVaultDefaults.compound();
+        _vaults[3] = ArvoVaultDefaults.foundation();
+
+        _vaultExists[0] = true;
+        _vaultExists[1] = true;
+        _vaultExists[2] = true;
+        _vaultExists[3] = true;
+
+        nextVaultId = 4;
+    }
+
+    /*
+     * =============================================================
+     *                           STAKING
+     * =============================================================
+     */
+
+    function stake(
+        uint32 vaultId,
+        ArvoStakingTypes.StakeMode stakeMode,
+        ArvoStakingTypes.RewardMode rewardMode,
+        uint256 arvoAmount,
+        uint256 usdcAmount
+    ) external nonReentrant whenNotPaused returns (uint256 positionId) {
+        ArvoStakingTypes.VaultConfig memory config = _getVault(vaultId);
+
+        _validateStake(config, stakeMode, arvoAmount, usdcAmount);
+
+        _validateRewardMode(config, rewardMode);
+
+        _validateCapacity(vaultId, config, arvoAmount, usdcAmount);
+
+        /*
+         * At this stage rewards are same-asset only.
+         *
+         * Cross-asset reward conversion will be introduced separately
+         * behind the oracle layer.
+         */
+        (uint256 arvoReward, uint256 usdcReward, uint16 appliedDualBoost) =
+            _calculateReward(config, stakeMode, rewardMode, arvoAmount, usdcAmount);
+
+        /*
+         * Reward capacity is checked BEFORE user principal is transferred.
+         *
+         * This prevents newly deposited principal from being mistaken
+         * for available reward capital.
+         */
+        _requireRewardCapacity(arvoReward, usdcReward);
+
+        if (arvoAmount != 0) {
+            _pullExact(arvo, msg.sender, arvoAmount);
+        }
+
+        if (usdcAmount != 0) {
+            _pullExact(usdc, msg.sender, usdcAmount);
+        }
+
+        positionId = nextPositionId++;
+
+        uint64 openedAt = block.timestamp.toUint64();
+
+        uint64 maturesAt = (block.timestamp + uint256(config.duration)).toUint64();
+
+        _positions[positionId] = ArvoStakingTypes.Position({
+            owner: msg.sender,
+            vaultId: vaultId,
+            stakeMode: stakeMode,
+            rewardMode: rewardMode,
+            openedAt: openedAt,
+            maturesAt: maturesAt,
+            settledAt: 0,
+            arvoPrincipal: arvoAmount,
+            usdcPrincipal: usdcAmount,
+            arvoReward: arvoReward,
+            usdcReward: usdcReward,
+            appliedDualBoostBps: appliedDualBoost,
+            appliedLoyaltyBoostBps: 0,
+            previousPositionId: 0,
+            nextPositionId: 0,
+            settled: false,
+            emergencyExit: false
+        });
+
+        _userPositionIds[msg.sender].push(positionId);
+
+        arvoPrincipalLiability += arvoAmount;
+        usdcPrincipalLiability += usdcAmount;
+
+        arvoRewardLiability += arvoReward;
+        usdcRewardLiability += usdcReward;
+
+        vaultArvoPrincipal[vaultId] += arvoAmount;
+        vaultUsdcPrincipal[vaultId] += usdcAmount;
+
+        emit Staked(
+            positionId,
+            msg.sender,
+            vaultId,
+            stakeMode,
+            rewardMode,
+            arvoAmount,
+            usdcAmount,
+            arvoReward,
+            usdcReward,
+            maturesAt
+        );
+    }
+
+    /*
+     * =============================================================
+     *                       REWARD FUNDING
+     * =============================================================
+     */
+
+    function fundArvoRewards(uint256 amount) external nonReentrant onlyRole(REWARD_MANAGER_ROLE) {
+        if (amount == 0) {
+            revert InvalidAmount();
+        }
+
+        _pullExact(arvo, msg.sender, amount);
+
+        emit RewardReserveFunded(address(arvo), msg.sender, amount);
+    }
+
+    function fundUsdcRewards(uint256 amount) external nonReentrant onlyRole(REWARD_MANAGER_ROLE) {
+        if (amount == 0) {
+            revert InvalidAmount();
+        }
+
+        _pullExact(usdc, msg.sender, amount);
+
+        emit RewardReserveFunded(address(usdc), msg.sender, amount);
+    }
+
+    /*
+     * Only assets genuinely in excess of every principal and promised
+     * reward liability may leave through an administrator function.
+     */
+
+    function withdrawArvoSurplus(address recipient, uint256 amount)
+        external
+        nonReentrant
+        onlyRole(REWARD_MANAGER_ROLE)
+    {
+        if (recipient == address(0)) {
+            revert ZeroAddress();
+        }
+
+        uint256 surplus = availableArvoRewardCapacity();
+
+        if (amount == 0 || amount > surplus) {
+            revert InsufficientSurplus();
+        }
+
+        arvo.safeTransfer(recipient, amount);
+
+        emit SurplusWithdrawn(address(arvo), recipient, amount);
+    }
+
+    function withdrawUsdcSurplus(address recipient, uint256 amount)
+        external
+        nonReentrant
+        onlyRole(REWARD_MANAGER_ROLE)
+    {
+        if (recipient == address(0)) {
+            revert ZeroAddress();
+        }
+
+        uint256 surplus = availableUsdcRewardCapacity();
+
+        if (amount == 0 || amount > surplus) {
+            revert InsufficientSurplus();
+        }
+
+        usdc.safeTransfer(recipient, amount);
+
+        emit SurplusWithdrawn(address(usdc), recipient, amount);
+    }
+
+    /*
+     * =============================================================
+     *                       ADMIN CONTROLS
+     * =============================================================
+     */
+
+    function configureVault(uint32 vaultId, ArvoStakingTypes.VaultConfig calldata config)
+        external
+        onlyRole(VAULT_MANAGER_ROLE)
+    {
+        if (!_vaultExists[vaultId]) {
+            revert InvalidVault();
+        }
+
+        _validateVaultConfiguration(config);
+
+        _vaults[vaultId] = config;
+
+        emit VaultConfigured(vaultId);
+    }
+
+    function createVault(ArvoStakingTypes.VaultConfig calldata config)
+        external
+        onlyRole(VAULT_MANAGER_ROLE)
+        returns (uint32 vaultId)
+    {
+        _validateVaultConfiguration(config);
+
+        vaultId = nextVaultId++;
+
+        _vaults[vaultId] = config;
+        _vaultExists[vaultId] = true;
+
+        emit VaultCreated(vaultId);
+        emit VaultConfigured(vaultId);
+    }
+
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
+
+    /*
+     * =============================================================
+     *                           VIEWS
+     * =============================================================
+     */
+
+    function vault(uint32 vaultId) external view returns (ArvoStakingTypes.VaultConfig memory) {
+        return _getVault(vaultId);
+    }
+
+    function vaultExists(uint32 vaultId) external view returns (bool) {
+        return _vaultExists[vaultId];
+    }
+
+    function position(uint256 positionId) external view returns (ArvoStakingTypes.Position memory) {
+        return _positions[positionId];
+    }
+
+    function userPositionIds(address user) external view returns (uint256[] memory) {
+        return _userPositionIds[user];
+    }
+
+    /*
+     * Reward capacity means:
+     *
+     * token balance
+     * - user principal
+     * - already promised rewards
+     *
+     * Principal can therefore never fund a new reward promise.
+     */
+
+    function availableArvoRewardCapacity() public view returns (uint256) {
+        uint256 liabilities = arvoPrincipalLiability + arvoRewardLiability;
+
+        uint256 balance = arvo.balanceOf(address(this));
+
+        if (balance <= liabilities) {
+            return 0;
+        }
+
+        return balance - liabilities;
+    }
+
+    function availableUsdcRewardCapacity() public view returns (uint256) {
+        uint256 liabilities = usdcPrincipalLiability + usdcRewardLiability;
+
+        uint256 balance = usdc.balanceOf(address(this));
+
+        if (balance <= liabilities) {
+            return 0;
+        }
+
+        return balance - liabilities;
+    }
+
+    function isArvoSolvent() external view returns (bool) {
+        return arvo.balanceOf(address(this)) >= arvoPrincipalLiability + arvoRewardLiability;
+    }
+
+    function isUsdcSolvent() external view returns (bool) {
+        return usdc.balanceOf(address(this)) >= usdcPrincipalLiability + usdcRewardLiability;
+    }
+
+    /*
+     * =============================================================
+     *                       INTERNAL LOGIC
+     * =============================================================
+     */
+
+    function _getVault(uint32 vaultId)
+        internal
+        view
+        returns (ArvoStakingTypes.VaultConfig memory config)
+    {
+        if (!_vaultExists[vaultId]) {
+            revert InvalidVault();
+        }
+
+        config = _vaults[vaultId];
+
+        if (config.duration == 0) {
+            revert InvalidVault();
+        }
+    }
+
+    function _validateStake(
+        ArvoStakingTypes.VaultConfig memory config,
+        ArvoStakingTypes.StakeMode stakeMode,
+        uint256 arvoAmount,
+        uint256 usdcAmount
+    ) internal pure {
+        if (!config.enabled) {
+            revert VaultDisabled();
+        }
+
+        if (stakeMode == ArvoStakingTypes.StakeMode.ARVO) {
+            if (!config.arvoStakeEnabled) {
+                revert StakeModeDisabled();
+            }
+
+            if (arvoAmount == 0 || usdcAmount != 0) {
+                revert InvalidAmount();
+            }
+
+            if (arvoAmount < config.minArvo) {
+                revert BelowMinimum();
+            }
+
+            return;
+        }
+
+        if (stakeMode == ArvoStakingTypes.StakeMode.USDC) {
+            if (!config.usdcStakeEnabled) {
+                revert StakeModeDisabled();
+            }
+
+            if (usdcAmount == 0 || arvoAmount != 0) {
+                revert InvalidAmount();
+            }
+
+            if (usdcAmount < config.minUsdc) {
+                revert BelowMinimum();
+            }
+
+            return;
+        }
+
+        if (!config.dualStakeEnabled) {
+            revert StakeModeDisabled();
+        }
+
+        if (arvoAmount == 0 || usdcAmount == 0) {
+            revert InvalidAmount();
+        }
+
+        if (arvoAmount < config.minArvo || usdcAmount < config.minUsdc) {
+            revert BelowMinimum();
+        }
+    }
+
+    function _validateRewardMode(
+        ArvoStakingTypes.VaultConfig memory config,
+        ArvoStakingTypes.RewardMode rewardMode
+    ) internal pure {
+        if (rewardMode == ArvoStakingTypes.RewardMode.ARVO && !config.arvoRewardEnabled) {
+            revert RewardModeDisabled();
+        }
+
+        if (rewardMode == ArvoStakingTypes.RewardMode.USDC && !config.usdcRewardEnabled) {
+            revert RewardModeDisabled();
+        }
+
+        if (rewardMode == ArvoStakingTypes.RewardMode.MIXED && !config.mixedRewardEnabled) {
+            revert RewardModeDisabled();
+        }
+    }
+
+    function _validateCapacity(
+        uint32 vaultId,
+        ArvoStakingTypes.VaultConfig memory config,
+        uint256 arvoAmount,
+        uint256 usdcAmount
+    ) internal view {
+        if (
+            config.maxArvoPrincipal != 0
+                && vaultArvoPrincipal[vaultId] + arvoAmount > config.maxArvoPrincipal
+        ) {
+            revert CapacityExceeded();
+        }
+
+        if (
+            config.maxUsdcPrincipal != 0
+                && vaultUsdcPrincipal[vaultId] + usdcAmount > config.maxUsdcPrincipal
+        ) {
+            revert CapacityExceeded();
+        }
+    }
+
+    function _calculateReward(
+        ArvoStakingTypes.VaultConfig memory config,
+        ArvoStakingTypes.StakeMode stakeMode,
+        ArvoStakingTypes.RewardMode rewardMode,
+        uint256 arvoAmount,
+        uint256 usdcAmount
+    ) internal pure returns (uint256 arvoReward, uint256 usdcReward, uint16 appliedDualBoost) {
+        uint256 rewardMultiplier = BPS;
+
+        if (stakeMode == ArvoStakingTypes.StakeMode.DUAL) {
+            appliedDualBoost = config.dualBoostBps;
+
+            uint256 cappedBoost = appliedDualBoost;
+
+            if (cappedBoost > config.combinedBoostCapBps) {
+                cappedBoost = config.combinedBoostCapBps;
+            }
+
+            rewardMultiplier = BPS + cappedBoost;
+        }
+
+        /*
+         * Until the oracle module is introduced, rewards can only
+         * be paid in assets represented by the position.
+         *
+         * Multipliers are combined before division to minimise
+         * intermediate rounding loss.
+         */
+
+        if (rewardMode == ArvoStakingTypes.RewardMode.ARVO) {
+            if (arvoAmount == 0) {
+                revert RewardModeDisabled();
+            }
+
+            arvoReward = (arvoAmount * config.arvoRewardBps * rewardMultiplier) / (BPS * BPS);
+
+            return (arvoReward, 0, appliedDualBoost);
+        }
+
+        if (rewardMode == ArvoStakingTypes.RewardMode.USDC) {
+            if (usdcAmount == 0) {
+                revert RewardModeDisabled();
+            }
+
+            usdcReward = (usdcAmount * config.usdcRewardBps * rewardMultiplier) / (BPS * BPS);
+
+            return (0, usdcReward, appliedDualBoost);
+        }
+
+        if (stakeMode != ArvoStakingTypes.StakeMode.DUAL) {
+            revert RewardModeDisabled();
+        }
+
+        uint256 arvoShare = config.mixedArvoShareBps;
+
+        uint256 usdcShare = BPS - arvoShare;
+
+        arvoReward =
+            (arvoAmount * config.arvoRewardBps * rewardMultiplier * arvoShare) / (BPS * BPS * BPS);
+
+        usdcReward =
+            (usdcAmount * config.usdcRewardBps * rewardMultiplier * usdcShare) / (BPS * BPS * BPS);
+    }
+
+    function _requireRewardCapacity(uint256 additionalArvoReward, uint256 additionalUsdcReward)
+        internal
+        view
+    {
+        if (additionalArvoReward > availableArvoRewardCapacity()) {
+            revert InsufficientRewardReserve();
+        }
+
+        if (additionalUsdcReward > availableUsdcRewardCapacity()) {
+            revert InsufficientRewardReserve();
+        }
+    }
+
+    function _validateVaultConfiguration(ArvoStakingTypes.VaultConfig calldata config)
+        internal
+        pure
+    {
+        if (config.duration == 0) {
+            revert InvalidConfiguration();
+        }
+
+        if (config.arvoRewardBps > BPS || config.usdcRewardBps > BPS) {
+            revert InvalidConfiguration();
+        }
+
+        if (config.mixedArvoShareBps > BPS) {
+            revert InvalidConfiguration();
+        }
+
+        /*
+         * Initial safety ceiling.
+         *
+         * This prevents an accidental admin entry such as a
+         * 1,500% boost from immediately becoming valid.
+         */
+        if (config.dualBoostBps > 5_000 || config.combinedBoostCapBps > 5_000) {
+            revert InvalidConfiguration();
+        }
+
+        if (config.dualBoostBps > config.combinedBoostCapBps) {
+            revert InvalidConfiguration();
+        }
+    }
+
+    /*
+     * Only accept tokens when the contract receives exactly the
+     * amount our accounting expects.
+     *
+     * This prevents fee-on-transfer or otherwise unusual ERC-20
+     * behaviour from creating liabilities larger than the assets
+     * actually received.
+     */
+    function _pullExact(IERC20 token, address from, uint256 amount) internal {
+        uint256 balanceBefore = token.balanceOf(address(this));
+
+        token.safeTransferFrom(from, address(this), amount);
+
+        uint256 balanceAfter = token.balanceOf(address(this));
+
+        if (balanceAfter < balanceBefore || balanceAfter - balanceBefore != amount) {
+            revert UnexpectedTokenTransfer();
+        }
+    }
+
+    function _authorizeUpgrade(address) internal override onlyRole(UPGRADER_ROLE) { }
+}

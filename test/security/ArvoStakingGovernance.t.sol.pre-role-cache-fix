@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { ArvoStakingTypes } from "../../src/ArvoStakingTypes.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+
+contract ArvoStakingGovernanceTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+    address internal pauser = address(0xBEEF);
+    address internal attacker = address(0xBAD);
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initialization =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initialization);
+
+        staking = ArvoStaking(address(proxy));
+
+        vm.startPrank(admin);
+        staking.grantRole(staking.PAUSER_ROLE(), pauser);
+        vm.stopPrank();
+    }
+
+    function testDedicatedPauserCanPause() public {
+        vm.prank(pauser);
+        staking.pause();
+
+        assertTrue(staking.paused());
+    }
+
+    function testDedicatedPauserCannotUnpause() public {
+        vm.prank(pauser);
+        staking.pause();
+
+        vm.prank(pauser);
+        vm.expectRevert();
+        staking.unpause();
+
+        assertTrue(staking.paused());
+    }
+
+    function testDefaultAdminCanUnpause() public {
+        vm.prank(pauser);
+        staking.pause();
+
+        vm.prank(admin);
+        staking.unpause();
+
+        assertFalse(staking.paused());
+    }
+
+    function testUnauthorizedWalletCannotPause() public {
+        vm.prank(attacker);
+        vm.expectRevert();
+        staking.pause();
+
+        assertFalse(staking.paused());
+    }
+
+    function testUnauthorizedWalletCannotUnpause() public {
+        vm.prank(pauser);
+        staking.pause();
+
+        vm.prank(attacker);
+        vm.expectRevert();
+        staking.unpause();
+
+        assertTrue(staking.paused());
+    }
+
+    function testDefaultAdminControlsOperationalRoleAdministration() public {
+        bytes32 vaultManagerRole = staking.VAULT_MANAGER_ROLE();
+
+        vm.prank(admin);
+        staking.grantRole(vaultManagerRole, pauser);
+
+        assertTrue(staking.hasRole(vaultManagerRole, pauser));
+
+        vm.prank(admin);
+        staking.revokeRole(vaultManagerRole, pauser);
+
+        assertFalse(staking.hasRole(vaultManagerRole, pauser));
+    }
+
+    function testNonAdminCannotGrantOperationalRole() public {
+        vm.prank(attacker);
+        vm.expectRevert();
+        staking.grantRole(staking.VAULT_MANAGER_ROLE(), attacker);
+
+        assertFalse(staking.hasRole(staking.VAULT_MANAGER_ROLE(), attacker));
+    }
+
+    function testInitialAdminHoldsAllGovernanceRoles() public view {
+        assertTrue(staking.hasRole(staking.DEFAULT_ADMIN_ROLE(), admin));
+        assertTrue(staking.hasRole(staking.PAUSER_ROLE(), admin));
+        assertTrue(staking.hasRole(staking.VAULT_MANAGER_ROLE(), admin));
+        assertTrue(staking.hasRole(staking.REWARD_MANAGER_ROLE(), admin));
+        assertTrue(staking.hasRole(staking.UPGRADER_ROLE(), admin));
+    }
+}

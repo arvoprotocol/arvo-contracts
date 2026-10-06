@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+import { StdInvariant } from "forge-std/StdInvariant.sol";
+
+import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { ArvoStakingTypes } from "../../src/ArvoStakingTypes.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+import { ArvoStakingHandler } from "./ArvoStakingHandler.sol";
+
+contract ArvoStakingInvariantTest is StdInvariant, Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    ArvoStakingHandler internal handler;
+
+    address internal admin = address(0xA11CE);
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        ERC1967Proxy proxy = new ERC1967Proxy(
+            address(implementation),
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin))
+        );
+
+        staking = ArvoStaking(address(proxy));
+
+        arvo.mint(admin, 10_000_000 ether);
+
+        usdc.mint(admin, 10_000_000e6);
+
+        vm.startPrank(admin);
+
+        arvo.approve(address(staking), type(uint256).max);
+
+        usdc.approve(address(staking), type(uint256).max);
+
+        staking.fundArvoRewards(5_000_000 ether);
+
+        staking.fundUsdcRewards(5_000_000e6);
+
+        uint32 poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            uint64(block.timestamp + 1),
+            0,
+            0,
+            0,
+            true,
+            true,
+            true,
+            true,
+            true
+        );
+
+        staking.reservePoolRewardBudget(poolId, 4_000_000 ether, 4_000_000e6);
+
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 1);
+
+        handler = new ArvoStakingHandler(staking, arvo, usdc, admin, poolId);
+
+        targetContract(address(handler));
+    }
+
+    function invariant_arvoAlwaysSolvent() public view {
+        uint256 protectedAssets = staking.arvoPrincipalLiability() + staking.arvoRewardLiability()
+            + staking.arvoRewardBudgetReserved();
+
+        assertGe(arvo.balanceOf(address(staking)), protectedAssets);
+    }
+
+    function invariant_usdcAlwaysSolvent() public view {
+        uint256 protectedAssets = staking.usdcPrincipalLiability() + staking.usdcRewardLiability()
+            + staking.usdcRewardBudgetReserved();
+
+        assertGe(usdc.balanceOf(address(staking)), protectedAssets);
+    }
+
+    function invariant_solvencyViewsRemainTrue() public view {
+        assertTrue(staking.isArvoSolvent());
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+}

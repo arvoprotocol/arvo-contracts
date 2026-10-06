@@ -1,0 +1,130 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+import { TimelockController } from "@openzeppelin/contracts/governance/TimelockController.sol";
+import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import { ConfigureArvoGovernance } from "../../script/ConfigureArvoGovernance.s.sol";
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+
+contract ConfigureArvoGovernanceTest is Test {
+    uint256 internal constant DELAY = 48 hours;
+
+    address internal deploymentAdmin = address(0xA11CE);
+    address internal safe = address(0x5AFE);
+    address internal emergency = address(0xE911);
+
+    ArvoStaking internal staking;
+    ConfigureArvoGovernance internal configurator;
+
+    function setUp() public {
+        MockERC20 arvo = new MockERC20("Arvo", "ARVO", 18);
+
+        MockERC20 usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initialization = abi.encodeCall(
+            ArvoStaking.initialize, (address(arvo), address(usdc), deploymentAdmin)
+        );
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initialization);
+
+        staking = ArvoStaking(address(proxy));
+
+        configurator = new ConfigureArvoGovernance();
+    }
+
+    function _config()
+        internal
+        view
+        returns (ConfigureArvoGovernance.GovernanceConfig memory config)
+    {
+        config = ConfigureArvoGovernance.GovernanceConfig({
+            stakingProxy: address(staking),
+            deploymentAdmin: deploymentAdmin,
+            governanceSafe: safe,
+            emergencyAuthority: emergency,
+            timelockDelay: DELAY
+        });
+    }
+
+    function testDeployTimelockHasExpectedConfiguration() public {
+        TimelockController timelock = configurator.deployTimelock(safe, DELAY);
+
+        assertEq(timelock.getMinDelay(), DELAY);
+
+        assertTrue(timelock.hasRole(timelock.PROPOSER_ROLE(), safe));
+
+        assertTrue(timelock.hasRole(timelock.EXECUTOR_ROLE(), safe));
+
+        assertFalse(timelock.hasRole(timelock.DEFAULT_ADMIN_ROLE(), address(configurator)));
+    }
+
+    function testRejectsTimelockBelowMinimumDelay() public {
+        vm.expectRevert(ConfigureArvoGovernance.InvalidTimelockDelay.selector);
+
+        configurator.deployTimelock(safe, 23 hours);
+    }
+
+    function testHandoffCreatesExpectedFinalTopology() public {
+        TimelockController timelock = configurator.deployTimelock(safe, DELAY);
+
+        vm.prank(deploymentAdmin);
+
+        configurator.handoff(_config(), address(timelock));
+
+        assertTrue(staking.hasRole(staking.DEFAULT_ADMIN_ROLE(), address(timelock)));
+
+        assertTrue(staking.hasRole(staking.UPGRADER_ROLE(), address(timelock)));
+
+        assertTrue(staking.hasRole(staking.VAULT_MANAGER_ROLE(), safe));
+
+        assertTrue(staking.hasRole(staking.REWARD_MANAGER_ROLE(), safe));
+
+        assertTrue(staking.hasRole(staking.PAUSER_ROLE(), emergency));
+
+        assertFalse(staking.hasRole(staking.DEFAULT_ADMIN_ROLE(), deploymentAdmin));
+
+        assertFalse(staking.hasRole(staking.UPGRADER_ROLE(), deploymentAdmin));
+
+        assertFalse(staking.hasRole(staking.VAULT_MANAGER_ROLE(), deploymentAdmin));
+
+        assertFalse(staking.hasRole(staking.REWARD_MANAGER_ROLE(), deploymentAdmin));
+
+        assertFalse(staking.hasRole(staking.PAUSER_ROLE(), deploymentAdmin));
+    }
+
+    function testEmergencyAuthorityCanPauseButCannotUnpause() public {
+        TimelockController timelock = configurator.deployTimelock(safe, DELAY);
+
+        vm.prank(deploymentAdmin);
+
+        configurator.handoff(_config(), address(timelock));
+
+        vm.prank(emergency);
+        staking.pause();
+
+        assertTrue(staking.paused());
+
+        vm.prank(emergency);
+        vm.expectRevert();
+
+        staking.unpause();
+    }
+
+    function testDeploymentAdminCannotActAfterHandoff() public {
+        TimelockController timelock = configurator.deployTimelock(safe, DELAY);
+
+        vm.prank(deploymentAdmin);
+
+        configurator.handoff(_config(), address(timelock));
+
+        vm.prank(deploymentAdmin);
+        vm.expectRevert();
+
+        staking.pause();
+    }
+}

@@ -1,0 +1,992 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { ArvoStakingTypes } from "../../src/ArvoStakingTypes.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+
+contract ArvoStakingCompoundTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+    address internal alice = address(0xB0B);
+
+    uint32 internal foundationUsdcPool;
+    uint32 internal advanceArvoPool;
+
+    uint256 internal constant USDC_STAKE = 10_000e6;
+    uint256 internal constant USDC_FIRST_REWARD = 1_400e6;
+    uint256 internal constant USDC_COMPOUNDED_PRINCIPAL = 11_400e6;
+    uint256 internal constant USDC_SECOND_REWARD = 1_596e6;
+
+    uint256 internal constant ARVO_STAKE = 1000000 ether;
+    uint256 internal constant ARVO_FIRST_REWARD = 40000 ether;
+    uint256 internal constant ARVO_COMPOUNDED_PRINCIPAL = 1040000 ether;
+    uint256 internal constant ARVO_SECOND_REWARD = 41600 ether;
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initialization =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initialization);
+
+        staking = ArvoStaking(address(proxy));
+
+        arvo.mint(admin, 1000000000 ether);
+        usdc.mint(admin, 10_000_000e6);
+
+        vm.startPrank(admin);
+
+        arvo.approve(address(staking), type(uint256).max);
+        usdc.approve(address(staking), type(uint256).max);
+
+        staking.fundArvoRewards(100000000 ether);
+        staking.fundUsdcRewards(1_000_000e6);
+
+        foundationUsdcPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            uint64(vm.getBlockTimestamp() + 1),
+            0,
+            0,
+            50_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        advanceArvoPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.ADVANCE,
+            uint64(vm.getBlockTimestamp() + 1),
+            0,
+            5000000 ether,
+            0,
+            true,
+            false,
+            false,
+            true,
+            false
+        );
+
+        staking.reservePoolRewardBudget(foundationUsdcPool, 0, 500_000e6);
+
+        staking.reservePoolRewardBudget(advanceArvoPool, 50000000 ether, 0);
+
+        vm.stopPrank();
+
+        arvo.mint(alice, 10000000 ether);
+        usdc.mint(alice, 100_000e6);
+
+        vm.startPrank(alice);
+
+        arvo.approve(address(staking), type(uint256).max);
+        usdc.approve(address(staking), type(uint256).max);
+
+        vm.stopPrank();
+
+        vm.warp(vm.getBlockTimestamp() + 1);
+    }
+
+    function _warpToMaturity(uint256 positionId) internal {
+        ArvoStakingTypes.Position memory userPosition = staking.position(positionId);
+
+        vm.warp(userPosition.maturesAt);
+    }
+
+    function testCompoundUsdcSamePoolReclassifiesRewardAsPrincipal() public {
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        assertEq(staking.usdcPrincipalLiability(), USDC_STAKE);
+
+        assertEq(staking.usdcRewardLiability(), USDC_FIRST_REWARD);
+
+        uint256 aliceBalanceBefore = usdc.balanceOf(alice);
+
+        uint256 contractBalanceBefore = usdc.balanceOf(address(staking));
+
+        uint256 reservedBefore = staking.usdcRewardBudgetReserved();
+
+        _warpToMaturity(oldPositionId);
+
+        vm.prank(alice);
+
+        uint256 newPositionId =
+            staking.compound(oldPositionId, foundationUsdcPool, ArvoStakingTypes.RewardMode.USDC);
+
+        /*
+         * Compound performs no token transfer.
+         * The matured reward is reclassified from reward
+         * liability into user principal.
+         */
+        assertEq(usdc.balanceOf(alice), aliceBalanceBefore);
+
+        assertEq(usdc.balanceOf(address(staking)), contractBalanceBefore);
+
+        assertEq(staking.usdcPrincipalLiability(), USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.usdcRewardLiability(), USDC_SECOND_REWARD);
+
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.usdcRewardBudgetReserved(), reservedBefore - USDC_SECOND_REWARD);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        ArvoStakingTypes.Position memory newPosition = staking.position(newPositionId);
+
+        assertTrue(oldAfter.settled);
+        assertFalse(oldAfter.emergencyExit);
+        assertEq(oldAfter.nextPositionId, newPositionId);
+
+        assertEq(newPosition.previousPositionId, oldPositionId);
+
+        assertEq(newPosition.owner, alice);
+
+        assertEq(newPosition.vaultId, foundationUsdcPool);
+
+        assertEq(uint256(newPosition.stakeMode), uint256(ArvoStakingTypes.StakeMode.USDC));
+
+        assertEq(uint256(newPosition.rewardMode), uint256(ArvoStakingTypes.RewardMode.USDC));
+
+        assertEq(newPosition.arvoPrincipal, 0);
+
+        assertEq(newPosition.usdcPrincipal, USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(newPosition.arvoReward, 0);
+
+        assertEq(newPosition.usdcReward, USDC_SECOND_REWARD);
+
+        assertEq(newPosition.openedAt, oldAfter.settledAt);
+
+        assertEq(newPosition.maturesAt, uint256(newPosition.openedAt) + 365 days);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundArvoSamePoolReclassifiesRewardAsPrincipal() public {
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            advanceArvoPool,
+            ArvoStakingTypes.StakeMode.ARVO,
+            ArvoStakingTypes.RewardMode.ARVO,
+            ARVO_STAKE,
+            0
+        );
+
+        assertEq(staking.arvoPrincipalLiability(), ARVO_STAKE);
+
+        assertEq(staking.arvoRewardLiability(), ARVO_FIRST_REWARD);
+
+        uint256 aliceBalanceBefore = arvo.balanceOf(alice);
+
+        uint256 contractBalanceBefore = arvo.balanceOf(address(staking));
+
+        uint256 reservedBefore = staking.arvoRewardBudgetReserved();
+
+        _warpToMaturity(oldPositionId);
+
+        vm.prank(alice);
+
+        uint256 newPositionId =
+            staking.compound(oldPositionId, advanceArvoPool, ArvoStakingTypes.RewardMode.ARVO);
+
+        assertEq(arvo.balanceOf(alice), aliceBalanceBefore);
+
+        assertEq(arvo.balanceOf(address(staking)), contractBalanceBefore);
+
+        assertEq(staking.arvoPrincipalLiability(), ARVO_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.arvoRewardLiability(), ARVO_SECOND_REWARD);
+
+        assertEq(staking.vaultArvoPrincipal(advanceArvoPool), ARVO_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.arvoRewardBudgetReserved(), reservedBefore - ARVO_SECOND_REWARD);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        ArvoStakingTypes.Position memory newPosition = staking.position(newPositionId);
+
+        assertTrue(oldAfter.settled);
+        assertFalse(oldAfter.emergencyExit);
+        assertEq(oldAfter.nextPositionId, newPositionId);
+
+        assertEq(newPosition.previousPositionId, oldPositionId);
+
+        assertEq(newPosition.owner, alice);
+
+        assertEq(newPosition.vaultId, advanceArvoPool);
+
+        assertEq(uint256(newPosition.stakeMode), uint256(ArvoStakingTypes.StakeMode.ARVO));
+
+        assertEq(uint256(newPosition.rewardMode), uint256(ArvoStakingTypes.RewardMode.ARVO));
+
+        assertEq(newPosition.arvoPrincipal, ARVO_COMPOUNDED_PRINCIPAL);
+
+        assertEq(newPosition.usdcPrincipal, 0);
+
+        assertEq(newPosition.arvoReward, ARVO_SECOND_REWARD);
+
+        assertEq(newPosition.usdcReward, 0);
+
+        assertEq(newPosition.openedAt, oldAfter.settledAt);
+
+        assertEq(newPosition.maturesAt, uint256(newPosition.openedAt) + 90 days);
+
+        assertTrue(staking.isArvoSolvent());
+    }
+
+    function testCompoundUsdcMovesCompoundedPrincipalToDestinationPool() public {
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        uint64 opensAt = uint64(vm.getBlockTimestamp() + 1);
+
+        vm.startPrank(admin);
+
+        uint32 buildPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            opensAt,
+            0,
+            0,
+            50_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        staking.reservePoolRewardBudget(buildPool, 0, 500_000e6);
+
+        vm.stopPrank();
+
+        vm.warp(opensAt);
+
+        uint256 aliceBalanceBefore = usdc.balanceOf(alice);
+        uint256 contractBalanceBefore = usdc.balanceOf(address(staking));
+
+        vm.prank(alice);
+
+        uint256 newPositionId =
+            staking.compound(oldPositionId, buildPool, ArvoStakingTypes.RewardMode.USDC);
+
+        /*
+         * Foundation reward of 1,400 USDC becomes principal.
+         * The new Build cycle therefore starts with 11,400 USDC.
+         *
+         * Build pays 2%:
+         * 11,400 * 2% = 228 USDC.
+         */
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), 0);
+
+        assertEq(staking.vaultUsdcPrincipal(buildPool), USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.usdcPrincipalLiability(), USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.usdcRewardLiability(), 228e6);
+
+        assertEq(usdc.balanceOf(alice), aliceBalanceBefore);
+
+        assertEq(usdc.balanceOf(address(staking)), contractBalanceBefore);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        ArvoStakingTypes.Position memory newPosition = staking.position(newPositionId);
+
+        assertTrue(oldAfter.settled);
+        assertEq(oldAfter.nextPositionId, newPositionId);
+
+        assertEq(newPosition.previousPositionId, oldPositionId);
+
+        assertEq(newPosition.vaultId, buildPool);
+
+        assertEq(newPosition.usdcPrincipal, USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(newPosition.usdcReward, 228e6);
+
+        assertEq(newPosition.maturesAt, uint256(newPosition.openedAt) + 60 days);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundCrossPoolCapacityFailureLeavesOldPositionClaimable() public {
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        /*
+         * Create a destination whose cap fits the old 10,000 principal
+         * but not the compounded 11,400 principal.
+         */
+        uint64 opensAt = uint64(vm.getBlockTimestamp() + 1);
+
+        vm.startPrank(admin);
+
+        uint32 constrainedPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            opensAt,
+            0,
+            0,
+            11_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        staking.reservePoolRewardBudget(constrainedPool, 0, 500_000e6);
+
+        vm.stopPrank();
+
+        vm.warp(opensAt);
+
+        uint256 principalLiabilityBefore = staking.usdcPrincipalLiability();
+
+        uint256 rewardLiabilityBefore = staking.usdcRewardLiability();
+
+        uint256 sourcePrincipalBefore = staking.vaultUsdcPrincipal(foundationUsdcPool);
+
+        vm.prank(alice);
+        vm.expectRevert(ArvoStaking.CapacityExceeded.selector);
+
+        staking.compound(oldPositionId, constrainedPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        assertFalse(oldAfter.settled);
+        assertEq(oldAfter.nextPositionId, 0);
+
+        assertEq(staking.usdcPrincipalLiability(), principalLiabilityBefore);
+
+        assertEq(staking.usdcRewardLiability(), rewardLiabilityBefore);
+
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), sourcePrincipalBefore);
+
+        /*
+         * A failed Compound must not destroy the user's normal
+         * matured Claim path.
+         */
+        uint256 aliceBeforeClaim = usdc.balanceOf(alice);
+
+        vm.prank(alice);
+        staking.claim(oldPositionId);
+
+        assertEq(usdc.balanceOf(alice), aliceBeforeClaim + USDC_STAKE + USDC_FIRST_REWARD);
+    }
+
+    function testCompoundInsufficientDestinationRewardBudgetIsAtomic() public {
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        uint64 opensAt = uint64(vm.getBlockTimestamp() + 1);
+
+        vm.startPrank(admin);
+
+        uint32 buildPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            opensAt,
+            0,
+            0,
+            50_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        /*
+         * Compounded Build reward is 228 USDC.
+         * Reserve one unit less deliberately.
+         */
+        staking.reservePoolRewardBudget(buildPool, 0, 228e6 - 1);
+
+        vm.stopPrank();
+
+        vm.warp(opensAt);
+
+        uint256 principalLiabilityBefore = staking.usdcPrincipalLiability();
+
+        uint256 rewardLiabilityBefore = staking.usdcRewardLiability();
+
+        uint256 reservedBefore = staking.usdcRewardBudgetReserved();
+
+        vm.prank(alice);
+        vm.expectRevert(ArvoStaking.InsufficientPoolRewardBudget.selector);
+
+        staking.compound(oldPositionId, buildPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        assertFalse(oldAfter.settled);
+        assertEq(oldAfter.nextPositionId, 0);
+
+        assertEq(staking.usdcPrincipalLiability(), principalLiabilityBefore);
+
+        assertEq(staking.usdcRewardLiability(), rewardLiabilityBefore);
+
+        assertEq(staking.usdcRewardBudgetReserved(), reservedBefore);
+
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), USDC_STAKE);
+
+        assertEq(staking.vaultUsdcPrincipal(buildPool), 0);
+    }
+
+    function testCompoundDestinationNotOpenIsAtomic() public {
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        uint64 opensAt = uint64(vm.getBlockTimestamp() + 1 days);
+
+        vm.startPrank(admin);
+
+        uint32 futurePool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            opensAt,
+            0,
+            0,
+            50_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        staking.reservePoolRewardBudget(futurePool, 0, 500_000e6);
+
+        vm.stopPrank();
+
+        uint256 principalLiabilityBefore = staking.usdcPrincipalLiability();
+
+        uint256 rewardLiabilityBefore = staking.usdcRewardLiability();
+
+        uint256 reservedBefore = staking.usdcRewardBudgetReserved();
+
+        vm.prank(alice);
+        vm.expectRevert(ArvoStaking.PoolNotOpen.selector);
+
+        staking.compound(oldPositionId, futurePool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        assertFalse(oldAfter.settled);
+        assertEq(oldAfter.nextPositionId, 0);
+
+        assertEq(staking.usdcPrincipalLiability(), principalLiabilityBefore);
+
+        assertEq(staking.usdcRewardLiability(), rewardLiabilityBefore);
+
+        assertEq(staking.usdcRewardBudgetReserved(), reservedBefore);
+
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), USDC_STAKE);
+
+        assertEq(staking.vaultUsdcPrincipal(futurePool), 0);
+    }
+
+    function testCompoundDualArvoRewardIntoPrincipalThenSelectUsdcReward() public {
+        uint64 opensAt = uint64(vm.getBlockTimestamp() + 1);
+
+        vm.startPrank(admin);
+
+        uint32 dualPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.ADVANCE,
+            opensAt,
+            0,
+            5000000 ether,
+            50_000e6,
+            true,
+            true,
+            true,
+            true,
+            true
+        );
+
+        staking.reservePoolRewardBudget(dualPool, 50000000 ether, 500_000e6);
+
+        vm.stopPrank();
+
+        vm.warp(opensAt);
+
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            dualPool,
+            ArvoStakingTypes.StakeMode.DUAL,
+            ArvoStakingTypes.RewardMode.ARVO,
+            ARVO_STAKE,
+            USDC_STAKE
+        );
+
+        ArvoStakingTypes.Position memory oldBefore = staking.position(oldPositionId);
+
+        /*
+         * Advance ARVO reward:
+         * 10,000 * 4% * 1.10 dual boost = 440 ARVO.
+         */
+        assertEq(oldBefore.arvoReward, 44000 ether);
+        assertEq(oldBefore.usdcReward, 0);
+        assertEq(oldBefore.appliedDualBoostBps, 1_000);
+
+        _warpToMaturity(oldPositionId);
+
+        uint256 aliceArvoBefore = arvo.balanceOf(alice);
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+
+        uint256 contractArvoBefore = arvo.balanceOf(address(staking));
+
+        uint256 contractUsdcBefore = usdc.balanceOf(address(staking));
+
+        vm.prank(alice);
+
+        uint256 newPositionId =
+            staking.compound(oldPositionId, dualPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        ArvoStakingTypes.Position memory newPosition = staking.position(newPositionId);
+
+        /*
+         * The OLD ARVO reward compounds into ARVO principal.
+         * USDC principal is unchanged.
+         */
+        assertEq(newPosition.arvoPrincipal, 1044000 ether);
+
+        assertEq(newPosition.usdcPrincipal, USDC_STAKE);
+
+        /*
+         * Alice selected USDC rewards for the NEW cycle.
+         *
+         * Advance USDC reward:
+         * 10,000 * 3% * 1.10 = 330 USDC.
+         */
+        assertEq(newPosition.arvoReward, 0);
+        assertEq(newPosition.usdcReward, 330e6);
+
+        assertEq(uint256(newPosition.rewardMode), uint256(ArvoStakingTypes.RewardMode.USDC));
+
+        assertEq(newPosition.appliedDualBoostBps, 1_000);
+
+        /*
+         * Compound itself transfers neither token.
+         */
+        assertEq(arvo.balanceOf(alice), aliceArvoBefore);
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore);
+
+        assertEq(arvo.balanceOf(address(staking)), contractArvoBefore);
+
+        assertEq(usdc.balanceOf(address(staking)), contractUsdcBefore);
+
+        /*
+         * Liability transition:
+         *
+         * ARVO reward became ARVO principal.
+         * New reward liability is USDC.
+         */
+        assertEq(staking.arvoPrincipalLiability(), 1044000 ether);
+
+        assertEq(staking.usdcPrincipalLiability(), USDC_STAKE);
+
+        assertEq(staking.arvoRewardLiability(), 0);
+
+        assertEq(staking.usdcRewardLiability(), 330e6);
+
+        assertEq(staking.vaultArvoPrincipal(dualPool), 1044000 ether);
+
+        assertEq(staking.vaultUsdcPrincipal(dualPool), USDC_STAKE);
+
+        assertTrue(oldAfter.settled);
+        assertEq(oldAfter.nextPositionId, newPositionId);
+        assertEq(newPosition.previousPositionId, oldPositionId);
+
+        assertTrue(staking.isArvoSolvent());
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundDualUsdcRewardIntoPrincipalThenSelectArvoReward() public {
+        uint64 opensAt = uint64(vm.getBlockTimestamp() + 1);
+
+        vm.startPrank(admin);
+
+        uint32 dualPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.ADVANCE,
+            opensAt,
+            0,
+            5000000 ether,
+            50_000e6,
+            true,
+            true,
+            true,
+            true,
+            true
+        );
+
+        staking.reservePoolRewardBudget(dualPool, 50000000 ether, 500_000e6);
+
+        vm.stopPrank();
+
+        vm.warp(opensAt);
+
+        vm.prank(alice);
+
+        uint256 oldPositionId = staking.stake(
+            dualPool,
+            ArvoStakingTypes.StakeMode.DUAL,
+            ArvoStakingTypes.RewardMode.USDC,
+            ARVO_STAKE,
+            USDC_STAKE
+        );
+
+        ArvoStakingTypes.Position memory oldBefore = staking.position(oldPositionId);
+
+        /*
+         * Advance USDC reward:
+         * 10,000 * 3% * 1.10 = 330 USDC.
+         */
+        assertEq(oldBefore.arvoReward, 0);
+        assertEq(oldBefore.usdcReward, 330e6);
+        assertEq(oldBefore.appliedDualBoostBps, 1_000);
+
+        _warpToMaturity(oldPositionId);
+
+        uint256 aliceArvoBefore = arvo.balanceOf(alice);
+        uint256 aliceUsdcBefore = usdc.balanceOf(alice);
+
+        uint256 contractArvoBefore = arvo.balanceOf(address(staking));
+
+        uint256 contractUsdcBefore = usdc.balanceOf(address(staking));
+
+        vm.prank(alice);
+
+        uint256 newPositionId =
+            staking.compound(oldPositionId, dualPool, ArvoStakingTypes.RewardMode.ARVO);
+
+        ArvoStakingTypes.Position memory oldAfter = staking.position(oldPositionId);
+
+        ArvoStakingTypes.Position memory newPosition = staking.position(newPositionId);
+
+        /*
+         * The OLD USDC reward compounds into USDC principal.
+         * ARVO principal is unchanged.
+         */
+        assertEq(newPosition.arvoPrincipal, ARVO_STAKE);
+
+        assertEq(newPosition.usdcPrincipal, 10_330e6);
+
+        /*
+         * Alice selected ARVO rewards for the NEW cycle.
+         *
+         * Advance ARVO reward:
+         * 10,000 * 4% * 1.10 = 440 ARVO.
+         */
+        assertEq(newPosition.arvoReward, 44000 ether);
+        assertEq(newPosition.usdcReward, 0);
+
+        assertEq(uint256(newPosition.rewardMode), uint256(ArvoStakingTypes.RewardMode.ARVO));
+
+        assertEq(newPosition.appliedDualBoostBps, 1_000);
+
+        assertEq(arvo.balanceOf(alice), aliceArvoBefore);
+        assertEq(usdc.balanceOf(alice), aliceUsdcBefore);
+
+        assertEq(arvo.balanceOf(address(staking)), contractArvoBefore);
+
+        assertEq(usdc.balanceOf(address(staking)), contractUsdcBefore);
+
+        /*
+         * Liability transition:
+         *
+         * USDC reward became USDC principal.
+         * New reward liability is ARVO.
+         */
+        assertEq(staking.arvoPrincipalLiability(), ARVO_STAKE);
+
+        assertEq(staking.usdcPrincipalLiability(), 10_330e6);
+
+        assertEq(staking.arvoRewardLiability(), 44000 ether);
+
+        assertEq(staking.usdcRewardLiability(), 0);
+
+        assertEq(staking.vaultArvoPrincipal(dualPool), ARVO_STAKE);
+
+        assertEq(staking.vaultUsdcPrincipal(dualPool), 10_330e6);
+
+        assertTrue(oldAfter.settled);
+        assertEq(oldAfter.nextPositionId, newPositionId);
+        assertEq(newPosition.previousPositionId, oldPositionId);
+
+        assertTrue(staking.isArvoSolvent());
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundRevertsForNonOwnerAndLeavesPositionUnchanged() public {
+        vm.warp(vm.getBlockTimestamp() + 1);
+
+        vm.prank(alice);
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        ArvoStakingTypes.Position memory beforePosition = staking.position(oldPositionId);
+
+        uint256 principalBefore = staking.usdcPrincipalLiability();
+        uint256 rewardBefore = staking.usdcRewardLiability();
+        uint256 vaultPrincipalBefore = staking.vaultUsdcPrincipal(foundationUsdcPool);
+
+        address attacker = address(0xBAD);
+
+        vm.expectRevert(ArvoStaking.NotPositionOwner.selector);
+        vm.prank(attacker);
+        staking.compound(oldPositionId, foundationUsdcPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory afterPosition = staking.position(oldPositionId);
+
+        assertFalse(afterPosition.settled);
+        assertEq(afterPosition.nextPositionId, 0);
+        assertEq(afterPosition.owner, beforePosition.owner);
+
+        assertEq(staking.usdcPrincipalLiability(), principalBefore);
+        assertEq(staking.usdcRewardLiability(), rewardBefore);
+
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), vaultPrincipalBefore);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundRevertsBeforeMaturityAndLeavesPositionUnchanged() public {
+        vm.warp(vm.getBlockTimestamp() + 1);
+
+        vm.prank(alice);
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        ArvoStakingTypes.Position memory beforePosition = staking.position(oldPositionId);
+
+        uint256 principalBefore = staking.usdcPrincipalLiability();
+        uint256 rewardBefore = staking.usdcRewardLiability();
+        uint256 reservedBefore = staking.usdcRewardBudgetReserved();
+
+        vm.expectRevert(ArvoStaking.PositionNotMatured.selector);
+        vm.prank(alice);
+        staking.compound(oldPositionId, foundationUsdcPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory afterPosition = staking.position(oldPositionId);
+
+        assertFalse(afterPosition.settled);
+        assertEq(afterPosition.nextPositionId, 0);
+        assertEq(afterPosition.maturesAt, beforePosition.maturesAt);
+
+        assertEq(staking.usdcPrincipalLiability(), principalBefore);
+        assertEq(staking.usdcRewardLiability(), rewardBefore);
+        assertEq(staking.usdcRewardBudgetReserved(), reservedBefore);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundRevertsWhenPositionAlreadySettled() public {
+        vm.warp(vm.getBlockTimestamp() + 1);
+
+        vm.prank(alice);
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        vm.prank(alice);
+        uint256 newPositionId =
+            staking.compound(oldPositionId, foundationUsdcPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldAfterFirst = staking.position(oldPositionId);
+
+        assertTrue(oldAfterFirst.settled);
+        assertEq(oldAfterFirst.nextPositionId, newPositionId);
+
+        vm.expectRevert(ArvoStaking.PositionAlreadySettled.selector);
+        vm.prank(alice);
+        staking.compound(oldPositionId, foundationUsdcPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldAfterSecond = staking.position(oldPositionId);
+
+        assertTrue(oldAfterSecond.settled);
+        assertEq(oldAfterSecond.nextPositionId, newPositionId);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testPauseBlocksCompoundButMaturedClaimStillWorks() public {
+        vm.warp(vm.getBlockTimestamp() + 1);
+
+        vm.prank(alice);
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        vm.prank(admin);
+        staking.pause();
+
+        vm.expectRevert();
+        vm.prank(alice);
+        staking.compound(oldPositionId, foundationUsdcPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory afterFailedCompound = staking.position(oldPositionId);
+
+        assertFalse(afterFailedCompound.settled);
+        assertEq(afterFailedCompound.nextPositionId, 0);
+
+        uint256 aliceBefore = usdc.balanceOf(alice);
+
+        vm.prank(alice);
+        staking.claim(oldPositionId);
+
+        assertEq(usdc.balanceOf(alice), aliceBefore + USDC_STAKE + USDC_FIRST_REWARD);
+
+        ArvoStakingTypes.Position memory afterClaim = staking.position(oldPositionId);
+
+        assertTrue(afterClaim.settled);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCompoundFromFinalizedSourceIntoOpenDestination() public {
+        vm.warp(vm.getBlockTimestamp() + 1);
+
+        vm.prank(alice);
+        uint256 oldPositionId = staking.stake(
+            foundationUsdcPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        _warpToMaturity(oldPositionId);
+
+        /*
+         * The source is open-ended, so disable it before finalizing.
+         */
+        vm.startPrank(admin);
+        staking.setPoolEnabled(foundationUsdcPool, false);
+        staking.finalizePool(foundationUsdcPool);
+
+        uint64 destinationOpensAt = uint64(vm.getBlockTimestamp() + 1);
+
+        uint32 destinationPool = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            destinationOpensAt,
+            0,
+            0,
+            50_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        staking.reservePoolRewardBudget(destinationPool, 0, 500_000e6);
+
+        vm.stopPrank();
+
+        vm.warp(destinationOpensAt);
+
+        vm.prank(alice);
+        uint256 newPositionId =
+            staking.compound(oldPositionId, destinationPool, ArvoStakingTypes.RewardMode.USDC);
+
+        ArvoStakingTypes.Position memory oldPosition = staking.position(oldPositionId);
+
+        ArvoStakingTypes.Position memory newPosition = staking.position(newPositionId);
+
+        assertTrue(oldPosition.settled);
+        assertEq(oldPosition.nextPositionId, newPositionId);
+
+        assertEq(newPosition.previousPositionId, oldPositionId);
+        assertEq(newPosition.vaultId, destinationPool);
+
+        assertEq(newPosition.usdcPrincipal, USDC_COMPOUNDED_PRINCIPAL);
+
+        assertEq(staking.vaultUsdcPrincipal(foundationUsdcPool), 0);
+
+        assertEq(staking.vaultUsdcPrincipal(destinationPool), USDC_COMPOUNDED_PRINCIPAL);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+}

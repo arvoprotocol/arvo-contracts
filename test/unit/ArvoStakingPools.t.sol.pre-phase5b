@@ -1,0 +1,875 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { ArvoStakingTypes } from "../../src/ArvoStakingTypes.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+
+import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+contract ArvoStakingPoolsTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initData =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+
+        staking = ArvoStaking(address(proxy));
+    }
+
+    function testCreatesFoundationPoolWithProtectedStandardTerms() public {
+        uint64 opensAt = uint64(block.timestamp + 5 days);
+
+        vm.prank(admin);
+        uint32 poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            opensAt,
+            0,
+            1_000_000 ether,
+            1_000_000e6,
+            true,
+            true,
+            true,
+            true,
+            true
+        );
+
+        assertEq(poolId, 4);
+        assertTrue(staking.poolExists(poolId));
+
+        ArvoStakingTypes.VaultConfig memory vault = staking.vault(poolId);
+
+        assertEq(vault.duration, 365 days);
+        assertEq(vault.arvoRewardBps, 3_000);
+        assertEq(vault.usdcRewardBps, 1_600);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertEq(uint256(pool.kind), uint256(ArvoStakingTypes.VaultKind.FOUNDATION));
+        assertEq(pool.opensAt, opensAt);
+        assertEq(pool.closesAt, 0);
+        assertEq(pool.maxArvoPrincipal, 1_000_000 ether);
+        assertEq(pool.maxUsdcPrincipal, 1_000_000e6);
+        assertTrue(pool.enabled);
+        assertFalse(pool.finalized);
+    }
+
+    function testCanCreateUsdcRewardOnlyFoundationPool() public {
+        uint64 opensAt = uint64(block.timestamp + 5 days);
+
+        vm.prank(admin);
+        uint32 poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            opensAt,
+            0,
+            0,
+            1_000_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+
+        ArvoStakingTypes.VaultConfig memory vault = staking.vault(poolId);
+
+        assertFalse(vault.arvoStakeEnabled);
+        assertTrue(vault.usdcStakeEnabled);
+        assertFalse(vault.dualStakeEnabled);
+
+        assertFalse(vault.arvoRewardEnabled);
+        assertTrue(vault.usdcRewardEnabled);
+        assertFalse(vault.mixedRewardEnabled);
+
+        // Standard economics remain present even though ARVO rewards
+        // are disabled for this individual pool.
+        assertEq(vault.arvoRewardBps, 3_000);
+        assertEq(vault.usdcRewardBps, 1_600);
+    }
+
+    function testRejectsCustomKindThroughStandardPoolCreation() public {
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.InvalidConfiguration.selector);
+
+        staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.CUSTOM,
+            uint64(block.timestamp + 1 days),
+            0,
+            0,
+            1_000_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+    }
+
+    function testRejectsInvalidPoolWindow() public {
+        uint64 opensAt = uint64(block.timestamp + 5 days);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.InvalidPoolWindow.selector);
+
+        staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            opensAt,
+            opensAt,
+            1_000_000 ether,
+            1_000_000e6,
+            true,
+            true,
+            true,
+            true,
+            true
+        );
+    }
+
+    function testCreatesCustomPool() public {
+        ArvoStakingTypes.VaultConfig memory config;
+
+        config.duration = 120 days;
+        config.arvoRewardBps = 900;
+        config.usdcRewardBps = 500;
+
+        config.dualBoostBps = 1_000;
+        config.combinedBoostCapBps = 1_500;
+
+        config.mixedArvoShareBps = 5_000;
+
+        config.minArvo = 1_000 ether;
+        config.minUsdc = 1_000e6;
+
+        config.enabled = true;
+
+        config.arvoStakeEnabled = true;
+        config.usdcStakeEnabled = true;
+        config.dualStakeEnabled = true;
+
+        config.arvoRewardEnabled = true;
+        config.usdcRewardEnabled = true;
+
+        // The contract must force this off until oracle support exists.
+        config.mixedRewardEnabled = true;
+
+        uint64 opensAt = uint64(block.timestamp + 2 days);
+        uint64 closesAt = uint64(block.timestamp + 7 days);
+
+        vm.prank(admin);
+        uint32 poolId =
+            staking.createCustomPool(config, opensAt, closesAt, 500_000 ether, 500_000e6);
+
+        ArvoStakingTypes.VaultConfig memory vault = staking.vault(poolId);
+
+        assertEq(vault.duration, 120 days);
+        assertEq(vault.arvoRewardBps, 900);
+        assertEq(vault.usdcRewardBps, 500);
+
+        assertFalse(vault.mixedRewardEnabled);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertEq(uint256(pool.kind), uint256(ArvoStakingTypes.VaultKind.CUSTOM));
+
+        assertEq(pool.opensAt, opensAt);
+        assertEq(pool.closesAt, closesAt);
+    }
+
+    function testCannotReEnablePoolAfterOpening() public {
+        uint64 opensAt = uint64(block.timestamp + 5 days);
+
+        vm.prank(admin);
+        uint32 poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            opensAt,
+            0,
+            1_000_000 ether,
+            0,
+            true,
+            false,
+            false,
+            true,
+            false
+        );
+
+        vm.prank(admin);
+        staking.setPoolEnabled(poolId, false);
+
+        vm.warp(opensAt);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.PoolAlreadyOpened.selector);
+        staking.setPoolEnabled(poolId, true);
+    }
+
+    function testUnauthorizedWalletCannotCreatePool() public {
+        vm.expectRevert();
+
+        staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.BUILD,
+            uint64(block.timestamp + 1 days),
+            0,
+            1_000_000 ether,
+            0,
+            true,
+            false,
+            false,
+            true,
+            false
+        );
+    }
+}
+
+// Additional reward-reservation tests are kept in a separate contract
+// so the existing pool-creation test setup remains unchanged.
+contract ArvoStakingPoolRewardBudgetTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initData =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+
+        staking = ArvoStaking(address(proxy));
+
+        arvo.mint(admin, 1_000_000 ether);
+        usdc.mint(admin, 1_000_000e6);
+
+        vm.startPrank(admin);
+
+        arvo.approve(address(staking), type(uint256).max);
+        usdc.approve(address(staking), type(uint256).max);
+
+        staking.fundArvoRewards(200_000 ether);
+        staking.fundUsdcRewards(200_000e6);
+
+        vm.stopPrank();
+    }
+
+    function _createFoundationPool() internal returns (uint32 poolId) {
+        vm.prank(admin);
+
+        poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            uint64(block.timestamp + 5 days),
+            0,
+            1_000_000 ether,
+            1_000_000e6,
+            true,
+            true,
+            false,
+            true,
+            true
+        );
+    }
+
+    function testReservationReducesFreeRewardCapacity() public {
+        uint32 poolId = _createFoundationPool();
+
+        vm.prank(admin);
+        staking.reservePoolRewardBudget(poolId, 50_000 ether, 150_000e6);
+
+        assertEq(staking.arvoRewardBudgetReserved(), 50_000 ether);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 150_000e6);
+
+        assertEq(staking.availableArvoRewardCapacity(), 150_000 ether);
+
+        assertEq(staking.availableUsdcRewardCapacity(), 50_000e6);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertEq(pool.arvoRewardBudget, 50_000 ether);
+
+        assertEq(pool.arvoRewardBudgetRemaining, 50_000 ether);
+
+        assertEq(pool.usdcRewardBudget, 150_000e6);
+
+        assertEq(pool.usdcRewardBudgetRemaining, 150_000e6);
+    }
+
+    function testReservedRewardsCannotBeWithdrawnAsSurplus() public {
+        uint32 poolId = _createFoundationPool();
+
+        vm.prank(admin);
+        staking.reservePoolRewardBudget(poolId, 50_000 ether, 150_000e6);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.InsufficientSurplus.selector);
+
+        staking.withdrawUsdcSurplus(admin, 50_001e6);
+
+        vm.prank(admin);
+        staking.withdrawUsdcSurplus(admin, 50_000e6);
+
+        assertEq(usdc.balanceOf(address(staking)), 150_000e6);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 150_000e6);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCannotReserveMoreThanFreeRewardCapacity() public {
+        uint32 poolId = _createFoundationPool();
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.InsufficientRewardReserve.selector);
+
+        staking.reservePoolRewardBudget(poolId, 0, 200_001e6);
+    }
+
+    function testCannotReserveBudgetAfterPoolOpens() public {
+        uint32 poolId = _createFoundationPool();
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        vm.warp(pool.opensAt);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.PoolBudgetLocked.selector);
+
+        staking.reservePoolRewardBudget(poolId, 0, 10_000e6);
+    }
+
+    function testMultiplePoolsCannotReserveSameFunds() public {
+        uint32 firstPool = _createFoundationPool();
+        uint32 secondPool = _createFoundationPool();
+
+        vm.prank(admin);
+        staking.reservePoolRewardBudget(firstPool, 0, 150_000e6);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.InsufficientRewardReserve.selector);
+
+        staking.reservePoolRewardBudget(secondPool, 0, 50_001e6);
+
+        vm.prank(admin);
+        staking.reservePoolRewardBudget(secondPool, 0, 50_000e6);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 200_000e6);
+
+        assertEq(staking.availableUsdcRewardCapacity(), 0);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+}
+
+contract ArvoStakingDynamicPoolStakeTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+    address internal user = address(0xB0B);
+
+    uint256 internal constant USDC_STAKE = 10_000e6;
+    uint256 internal constant FOUNDATION_USDC_REWARD = 1_600e6;
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initData =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+
+        staking = ArvoStaking(address(proxy));
+
+        usdc.mint(admin, 1_000_000e6);
+        usdc.mint(user, 100_000e6);
+
+        vm.startPrank(admin);
+        usdc.approve(address(staking), type(uint256).max);
+        staking.fundUsdcRewards(200_000e6);
+        vm.stopPrank();
+
+        vm.prank(user);
+        usdc.approve(address(staking), type(uint256).max);
+    }
+
+    function _createFoundationPool(uint64 opensAt, uint64 closesAt)
+        internal
+        returns (uint32 poolId)
+    {
+        vm.prank(admin);
+
+        poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            opensAt,
+            closesAt,
+            0,
+            1_000_000e6,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+    }
+
+    function _reserveUsdc(uint32 poolId, uint256 amount) internal {
+        vm.prank(admin);
+        staking.reservePoolRewardBudget(poolId, 0, amount);
+    }
+
+    function _stakeUsdc(uint32 poolId) internal returns (uint256 positionId) {
+        vm.prank(user);
+
+        positionId = staking.stake(
+            poolId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, USDC_STAKE
+        );
+    }
+
+    function testCannotStakeBeforePoolOpens() public {
+        uint64 opensAt = uint64(block.timestamp + 5 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, 0);
+
+        _reserveUsdc(poolId, 100_000e6);
+
+        vm.prank(user);
+        vm.expectRevert(ArvoStaking.PoolNotOpen.selector);
+
+        staking.stake(
+            poolId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, USDC_STAKE
+        );
+    }
+
+    function testCanStakeExactlyWhenPoolOpens() public {
+        uint64 opensAt = uint64(block.timestamp + 5 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, 0);
+
+        _reserveUsdc(poolId, 100_000e6);
+
+        vm.warp(opensAt);
+
+        uint256 positionId = _stakeUsdc(poolId);
+
+        ArvoStakingTypes.Position memory position = staking.position(positionId);
+
+        assertEq(position.owner, user);
+        assertEq(position.usdcPrincipal, USDC_STAKE);
+        assertEq(position.usdcReward, FOUNDATION_USDC_REWARD);
+    }
+
+    function testCannotStakeAtClosingTime() public {
+        uint64 opensAt = uint64(block.timestamp + 2 days);
+        uint64 closesAt = uint64(block.timestamp + 7 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, closesAt);
+
+        _reserveUsdc(poolId, 100_000e6);
+
+        vm.warp(closesAt);
+
+        vm.prank(user);
+        vm.expectRevert(ArvoStaking.PoolClosed.selector);
+
+        staking.stake(
+            poolId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, USDC_STAKE
+        );
+    }
+
+    function testCannotStakeWithoutPoolRewardBudget() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, 0);
+
+        vm.warp(opensAt);
+
+        vm.prank(user);
+        vm.expectRevert(ArvoStaking.InsufficientPoolRewardBudget.selector);
+
+        staking.stake(
+            poolId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, USDC_STAKE
+        );
+    }
+
+    function testStakeConsumesExactPoolRewardBudget() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, 0);
+
+        _reserveUsdc(poolId, 100_000e6);
+
+        vm.warp(opensAt);
+
+        _stakeUsdc(poolId);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertEq(pool.usdcRewardBudget, 100_000e6);
+
+        assertEq(pool.usdcRewardBudgetRemaining, 100_000e6 - FOUNDATION_USDC_REWARD);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 100_000e6 - FOUNDATION_USDC_REWARD);
+    }
+
+    function testReservedRewardBecomesCommittedLiability() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, 0);
+
+        _reserveUsdc(poolId, 100_000e6);
+
+        assertEq(staking.usdcRewardLiability(), 0);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 100_000e6);
+
+        vm.warp(opensAt);
+
+        _stakeUsdc(poolId);
+
+        assertEq(staking.usdcRewardLiability(), FOUNDATION_USDC_REWARD);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 100_000e6 - FOUNDATION_USDC_REWARD);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testFreeCapacityUnchangedWhenReservedRewardBecomesCommitted() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createFoundationPool(opensAt, 0);
+
+        _reserveUsdc(poolId, 100_000e6);
+
+        uint256 freeBefore = staking.availableUsdcRewardCapacity();
+
+        assertEq(freeBefore, 100_000e6);
+
+        vm.warp(opensAt);
+
+        _stakeUsdc(poolId);
+
+        uint256 freeAfter = staking.availableUsdcRewardCapacity();
+
+        assertEq(freeAfter, freeBefore);
+    }
+
+    function testPoolCannotSpendAnotherPoolsBudget() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 fundedPool = _createFoundationPool(opensAt, 0);
+
+        uint32 unfundedPool = _createFoundationPool(opensAt, 0);
+
+        _reserveUsdc(fundedPool, FOUNDATION_USDC_REWARD);
+
+        vm.warp(opensAt);
+
+        vm.prank(user);
+        vm.expectRevert(ArvoStaking.InsufficientPoolRewardBudget.selector);
+
+        staking.stake(
+            unfundedPool,
+            ArvoStakingTypes.StakeMode.USDC,
+            ArvoStakingTypes.RewardMode.USDC,
+            0,
+            USDC_STAKE
+        );
+
+        ArvoStakingTypes.PoolConfig memory funded = staking.pool(fundedPool);
+
+        assertEq(funded.usdcRewardBudgetRemaining, FOUNDATION_USDC_REWARD);
+
+        assertEq(staking.usdcRewardBudgetReserved(), FOUNDATION_USDC_REWARD);
+    }
+}
+
+contract ArvoStakingPoolFinalizationTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+    address internal user = address(0xB0B);
+
+    uint256 internal constant USDC_STAKE = 10_000e6;
+    uint256 internal constant FOUNDATION_USDC_REWARD = 1_600e6;
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initData =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initData);
+
+        staking = ArvoStaking(address(proxy));
+
+        usdc.mint(admin, 1_000_000e6);
+        usdc.mint(user, 100_000e6);
+
+        vm.startPrank(admin);
+        usdc.approve(address(staking), type(uint256).max);
+        staking.fundUsdcRewards(200_000e6);
+        vm.stopPrank();
+
+        vm.prank(user);
+        usdc.approve(address(staking), type(uint256).max);
+    }
+
+    function _createPool(uint64 opensAt, uint64 closesAt, uint256 cap)
+        internal
+        returns (uint32 poolId)
+    {
+        vm.prank(admin);
+
+        poolId = staking.createStandardPool(
+            ArvoStakingTypes.VaultKind.FOUNDATION,
+            opensAt,
+            closesAt,
+            0,
+            cap,
+            false,
+            true,
+            false,
+            false,
+            true
+        );
+    }
+
+    function _reserve(uint32 poolId, uint256 amount) internal {
+        vm.prank(admin);
+        staking.reservePoolRewardBudget(poolId, 0, amount);
+    }
+
+    function _stake(uint32 poolId) internal {
+        vm.prank(user);
+
+        staking.stake(
+            poolId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, USDC_STAKE
+        );
+    }
+
+    function testProtocolAllocationConsumesPoolCapacity() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createPool(opensAt, 0, 20_000e6);
+
+        _reserve(poolId, 10_000e6);
+
+        vm.prank(admin);
+        staking.increaseProtocolAllocation(poolId, 0, 10_000e6);
+
+        vm.warp(opensAt);
+
+        _stake(poolId);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertEq(pool.protocolUsdcAllocation, 10_000e6);
+
+        assertEq(staking.vaultUsdcPrincipal(poolId), 10_000e6);
+
+        assertEq(staking.usdcPrincipalLiability(), 10_000e6);
+    }
+
+    function testProtocolAllocationCannotCreatePrincipalLiability() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createPool(opensAt, 0, 100_000e6);
+
+        uint256 balanceBefore = usdc.balanceOf(address(staking));
+
+        vm.prank(admin);
+        staking.increaseProtocolAllocation(poolId, 0, 50_000e6);
+
+        assertEq(staking.usdcPrincipalLiability(), 0);
+
+        assertEq(staking.vaultUsdcPrincipal(poolId), 0);
+
+        assertEq(usdc.balanceOf(address(staking)), balanceBefore);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertEq(pool.protocolUsdcAllocation, 50_000e6);
+    }
+
+    function testProtocolAllocationCannotExceedCapacity() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createPool(opensAt, 0, 100_000e6);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.CapacityExceeded.selector);
+
+        staking.increaseProtocolAllocation(poolId, 0, 100_001e6);
+    }
+
+    function testUserStakeCannotExceedCapacityIncludingProtocolAllocation() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createPool(opensAt, 0, 15_000e6);
+
+        _reserve(poolId, 10_000e6);
+
+        vm.prank(admin);
+        staking.increaseProtocolAllocation(poolId, 0, 10_000e6);
+
+        vm.warp(opensAt);
+
+        vm.prank(user);
+        vm.expectRevert(ArvoStaking.CapacityExceeded.selector);
+
+        staking.stake(
+            poolId, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, USDC_STAKE
+        );
+    }
+
+    function testCannotFinalizePoolWhileStillOpen() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createPool(opensAt, 0, 100_000e6);
+
+        vm.warp(opensAt);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.PoolStillOpen.selector);
+
+        staking.finalizePool(poolId);
+    }
+
+    function testOpenEndedPoolCanFinalizeAfterDisable() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+
+        uint32 poolId = _createPool(opensAt, 0, 100_000e6);
+
+        _reserve(poolId, 100_000e6);
+
+        vm.warp(opensAt);
+
+        vm.prank(admin);
+        staking.setPoolEnabled(poolId, false);
+
+        vm.prank(admin);
+        staking.finalizePool(poolId);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertTrue(pool.finalized);
+        assertFalse(pool.enabled);
+
+        assertEq(pool.usdcRewardBudgetRemaining, 0);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 0);
+    }
+
+    function testScheduledPoolCanFinalizeAfterClosingTime() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+        uint64 closesAt = uint64(block.timestamp + 5 days);
+
+        uint32 poolId = _createPool(opensAt, closesAt, 100_000e6);
+
+        _reserve(poolId, 100_000e6);
+
+        vm.warp(closesAt);
+
+        vm.prank(admin);
+        staking.finalizePool(poolId);
+
+        ArvoStakingTypes.PoolConfig memory pool = staking.pool(poolId);
+
+        assertTrue(pool.finalized);
+        assertFalse(pool.enabled);
+    }
+
+    function testFinalizationReleasesOnlyUnusedRewardBudget() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+        uint64 closesAt = uint64(block.timestamp + 5 days);
+
+        uint32 poolId = _createPool(opensAt, closesAt, 100_000e6);
+
+        _reserve(poolId, 100_000e6);
+
+        vm.warp(opensAt);
+
+        _stake(poolId);
+
+        assertEq(staking.usdcRewardLiability(), FOUNDATION_USDC_REWARD);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 100_000e6 - FOUNDATION_USDC_REWARD);
+
+        uint256 freeBefore = staking.availableUsdcRewardCapacity();
+
+        vm.warp(closesAt);
+
+        vm.prank(admin);
+        staking.finalizePool(poolId);
+
+        assertEq(staking.usdcRewardLiability(), FOUNDATION_USDC_REWARD);
+
+        assertEq(staking.usdcRewardBudgetReserved(), 0);
+
+        assertEq(
+            staking.availableUsdcRewardCapacity(), freeBefore + 100_000e6 - FOUNDATION_USDC_REWARD
+        );
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testCannotAllocateAfterFinalization() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+        uint64 closesAt = uint64(block.timestamp + 5 days);
+
+        uint32 poolId = _createPool(opensAt, closesAt, 100_000e6);
+
+        vm.warp(closesAt);
+
+        vm.prank(admin);
+        staking.finalizePool(poolId);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.PoolFinalizedAlready.selector);
+
+        staking.increaseProtocolAllocation(poolId, 0, 10_000e6);
+    }
+
+    function testCannotFinalizePoolTwice() public {
+        uint64 opensAt = uint64(block.timestamp + 1 days);
+        uint64 closesAt = uint64(block.timestamp + 5 days);
+
+        uint32 poolId = _createPool(opensAt, closesAt, 100_000e6);
+
+        vm.warp(closesAt);
+
+        vm.prank(admin);
+        staking.finalizePool(poolId);
+
+        vm.prank(admin);
+        vm.expectRevert(ArvoStaking.PoolFinalizedAlready.selector);
+
+        staking.finalizePool(poolId);
+    }
+}

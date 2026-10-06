@@ -1,0 +1,72 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { ArvoStakingTypes } from "./ArvoStakingTypes.sol";
+
+/// @notice Initial Arvo vault configuration.
+///
+/// @dev These are launch/testnet defaults. The staking contract will snapshot
+///      a position's terms at entry so future configuration changes cannot
+///      alter an existing position.
+library ArvoVaultDefaults {
+    uint8 internal constant BUILD = 0;
+    uint8 internal constant ADVANCE = 1;
+    uint8 internal constant COMPOUND = 2;
+    uint8 internal constant FOUNDATION = 3;
+
+    function build() internal pure returns (ArvoStakingTypes.VaultConfig memory) {
+        return _vault(60 days, 400, 300);
+    }
+
+    function advance() internal pure returns (ArvoStakingTypes.VaultConfig memory) {
+        return _vault(90 days, 700, 450);
+    }
+
+    function compound() internal pure returns (ArvoStakingTypes.VaultConfig memory) {
+        return _vault(180 days, 1_400, 900);
+    }
+
+    function foundation() internal pure returns (ArvoStakingTypes.VaultConfig memory) {
+        return _vault(365 days, 3_000, 1_800);
+    }
+
+    function _vault(uint32 duration, uint16 arvoRewardBps, uint16 usdcRewardBps)
+        private
+        pure
+        returns (ArvoStakingTypes.VaultConfig memory config)
+    {
+        config.duration = duration;
+
+        config.arvoRewardBps = arvoRewardBps;
+        config.usdcRewardBps = usdcRewardBps;
+
+        // Testnet placeholder: +10% reward uplift for dual staking.
+        config.dualBoostBps = 1_000;
+
+        // Dual + loyalty + future boosts can never exceed +15%
+        // without explicitly changing this configuration.
+        config.combinedBoostCapBps = 1_500;
+
+        // Initial mixed reward preference: 50/50.
+        config.mixedArvoShareBps = 5_000;
+
+        config.minArvo = 1_000 ether;
+
+        // Mock USDC uses 6 decimals.
+        config.minUsdc = 1_000e6;
+
+        // Zero means no capacity has been imposed yet.
+        config.maxArvoPrincipal = 0;
+        config.maxUsdcPrincipal = 0;
+
+        config.enabled = true;
+
+        config.arvoStakeEnabled = true;
+        config.usdcStakeEnabled = true;
+        config.dualStakeEnabled = true;
+
+        config.arvoRewardEnabled = true;
+        config.usdcRewardEnabled = true;
+        config.mixedRewardEnabled = true;
+    }
+}

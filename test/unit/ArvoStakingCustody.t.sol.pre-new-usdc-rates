@@ -1,0 +1,221 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import { Test } from "forge-std/Test.sol";
+import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
+import { ArvoStaking } from "../../src/ArvoStaking.sol";
+import { ArvoStakingTypes } from "../../src/ArvoStakingTypes.sol";
+import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+
+contract ArvoStakingCustodyTest is Test {
+    ArvoStaking internal staking;
+    MockERC20 internal arvo;
+    MockERC20 internal usdc;
+
+    address internal admin = address(0xA11CE);
+    address internal alice = address(0xB0B);
+    address internal attacker = address(0xBAD);
+
+    function setUp() public {
+        arvo = new MockERC20("Arvo", "ARVO", 18);
+
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+
+        ArvoStaking implementation = new ArvoStaking();
+
+        bytes memory initialization =
+            abi.encodeCall(ArvoStaking.initialize, (address(arvo), address(usdc), admin));
+
+        ERC1967Proxy proxy = new ERC1967Proxy(address(implementation), initialization);
+
+        staking = ArvoStaking(address(proxy));
+
+        arvo.mint(admin, 10_000_000 ether);
+
+        usdc.mint(admin, 10_000_000e6);
+
+        vm.startPrank(admin);
+
+        arvo.approve(address(staking), type(uint256).max);
+
+        usdc.approve(address(staking), type(uint256).max);
+
+        staking.fundArvoRewards(1_000_000 ether);
+
+        staking.fundUsdcRewards(1_000_000e6);
+
+        vm.stopPrank();
+
+        arvo.mint(alice, 100_000 ether);
+
+        usdc.mint(alice, 100_000e6);
+
+        vm.startPrank(alice);
+
+        arvo.approve(address(staking), type(uint256).max);
+
+        usdc.approve(address(staking), type(uint256).max);
+
+        vm.stopPrank();
+    }
+
+    function testInitialRewardReservesAreAvailable() public view {
+        assertEq(staking.availableArvoRewardCapacity(), 1_000_000 ether);
+
+        assertEq(staking.availableUsdcRewardCapacity(), 1_000_000e6);
+    }
+
+    function testFoundationArvoStakeCreatesCorrectLiabilities() public {
+        vm.prank(alice);
+
+        uint256 id = staking.stake(
+            3, ArvoStakingTypes.StakeMode.ARVO, ArvoStakingTypes.RewardMode.ARVO, 10_000 ether, 0
+        );
+
+        ArvoStakingTypes.Position memory p = staking.position(id);
+
+        assertEq(p.arvoPrincipal, 10_000 ether);
+
+        assertEq(p.arvoReward, 3_000 ether);
+
+        assertEq(staking.arvoPrincipalLiability(), 10_000 ether);
+
+        assertEq(staking.arvoRewardLiability(), 3_000 ether);
+
+        assertTrue(staking.isArvoSolvent());
+    }
+
+    function testFoundationUsdcStakeCreates18PercentReward() public {
+        vm.prank(alice);
+
+        uint256 id = staking.stake(
+            3, ArvoStakingTypes.StakeMode.USDC, ArvoStakingTypes.RewardMode.USDC, 0, 10_000e6
+        );
+
+        ArvoStakingTypes.Position memory p = staking.position(id);
+
+        assertEq(p.usdcPrincipal, 10_000e6);
+
+        assertEq(p.usdcReward, 1_800e6);
+
+        assertTrue(staking.isUsdcSolvent());
+    }
+
+    function testDualFoundationGetsTenPercentBoost() public {
+        vm.prank(alice);
+
+        uint256 id = staking.stake(
+            3,
+            ArvoStakingTypes.StakeMode.DUAL,
+            ArvoStakingTypes.RewardMode.MIXED,
+            10_000 ether,
+            10_000e6
+        );
+
+        ArvoStakingTypes.Position memory p = staking.position(id);
+
+        /*
+         * ARVO:
+         * 10,000 x 30% = 3,000
+         * dual uplift = 3,300
+         * 50% mixed share = 1,650
+         */
+        assertEq(p.arvoReward, 1_650 ether);
+
+        /*
+         * USDC:
+         * 10,000 x 18% = 1,800
+         * dual uplift = 1,980
+         * 50% mixed share = 990
+         */
+        assertEq(p.usdcReward, 990e6);
+
+        assertEq(p.appliedDualBoostBps, 1_000);
+    }
+
+    function testPrincipalIsNotCountedAsRewardCapacity() public {
+        uint256 capacityBefore = staking.availableArvoRewardCapacity();
+
+        vm.prank(alice);
+
+        staking.stake(
+            3, ArvoStakingTypes.StakeMode.ARVO, ArvoStakingTypes.RewardMode.ARVO, 10_000 ether, 0
+        );
+
+        /*
+         * User deposits 10,000 principal.
+         * Contract promises 3,000 reward.
+         *
+         * Reward capacity must therefore fall by 3,000,
+         * not increase because of the principal deposit.
+         */
+        assertEq(staking.availableArvoRewardCapacity(), capacityBefore - 3_000 ether);
+    }
+
+    function testStakeFailsIfRewardIsNotFunded() public {
+        uint256 available = staking.availableArvoRewardCapacity();
+
+        vm.prank(admin);
+
+        staking.withdrawArvoSurplus(admin, available);
+
+        vm.prank(alice);
+
+        vm.expectRevert(ArvoStaking.InsufficientRewardReserve.selector);
+
+        staking.stake(
+            3, ArvoStakingTypes.StakeMode.ARVO, ArvoStakingTypes.RewardMode.ARVO, 10_000 ether, 0
+        );
+    }
+
+    function testUnauthorizedWalletCannotFundRewards() public {
+        arvo.mint(attacker, 10_000 ether);
+
+        vm.startPrank(attacker);
+
+        arvo.approve(address(staking), type(uint256).max);
+
+        vm.expectRevert();
+
+        staking.fundArvoRewards(10_000 ether);
+
+        vm.stopPrank();
+    }
+
+    function testUnauthorizedWalletCannotWithdrawSurplus() public {
+        vm.prank(attacker);
+
+        vm.expectRevert();
+
+        staking.withdrawArvoSurplus(attacker, 1 ether);
+    }
+
+    function testAdminCannotWithdrawMoreThanTrueSurplus() public {
+        vm.prank(alice);
+
+        staking.stake(
+            3, ArvoStakingTypes.StakeMode.ARVO, ArvoStakingTypes.RewardMode.ARVO, 10_000 ether, 0
+        );
+
+        uint256 genuineSurplus = staking.availableArvoRewardCapacity();
+
+        vm.prank(admin);
+
+        vm.expectRevert(ArvoStaking.InsufficientSurplus.selector);
+
+        staking.withdrawArvoSurplus(admin, genuineSurplus + 1);
+    }
+
+    function testPausedProtocolRejectsNewStakes() public {
+        vm.prank(admin);
+        staking.pause();
+
+        vm.prank(alice);
+        vm.expectRevert();
+
+        staking.stake(
+            3, ArvoStakingTypes.StakeMode.ARVO, ArvoStakingTypes.RewardMode.ARVO, 10_000 ether, 0
+        );
+    }
+}
