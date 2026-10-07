@@ -10,6 +10,9 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 1
 via_ir = true
+# Solc 0.8.35 default passes, retaining only the final full-inlining pass.
+# Required for the 24 KiB implementation limit; protected by a runtime-size test.
+optimizer_details = { yulDetails = { optimizerSteps = "dfDvulfnTUtnIfxa[r]EscLMVcul[j]Trpeulxa[r]cLvfMCTUca[r]LSsTFOtfDnca[r]IulcscCTUtvfMx[scCTUt]TOntnfDIulvifMjmul[jul]VcTOculjmul:fDnTOcmuO" } }
 
 ffi = true
 ast = true

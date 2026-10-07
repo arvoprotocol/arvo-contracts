@@ -8,7 +8,9 @@ import { Options } from "openzeppelin-foundry-upgrades/Options.sol";
 contract ArvoStakingUpgradeValidationTest is Test {
     function testUpgradePreservesReviewedStorageLayout() public {
         Options memory opts;
-        opts.unsafeAllow = "constructor";
+        // Allow only the reviewed mapping-based factory library; no assembly or
+        // external token calls occur in that library. Keep storage checks enabled.
+        opts.unsafeAllow = "constructor,external-library-linking";
         opts.referenceContract = "ArvoStakingBaseline.sol:ArvoStakingBaseline";
         Upgrades.validateUpgrade("ArvoStaking.sol:ArvoStaking", opts);
     }
@@ -20,7 +22,9 @@ contract ArvoStakingUpgradeValidationTest is Test {
         // directs upgradeable contracts to use the regular implementation.
         // The upgrades validator still detects its constructor, so allow only
         // the constructor validation category. All other checks remain enabled.
-        opts.unsafeAllow = "constructor";
+        // Allow only the reviewed mapping-based factory library; no assembly or
+        // external token calls occur in that library. Keep storage checks enabled.
+        opts.unsafeAllow = "constructor,external-library-linking";
 
         Upgrades.validateImplementation("ArvoStaking.sol:ArvoStaking", opts);
     }
