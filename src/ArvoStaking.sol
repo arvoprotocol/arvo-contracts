@@ -20,7 +20,8 @@ import { IArvoPriceOracle } from "./interfaces/IArvoPriceOracle.sol";
 import { SafeCast } from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import { ArvoStakingTypes } from "./ArvoStakingTypes.sol";
-import { ArvoVaultDefaults } from "./ArvoVaultDefaults.sol";
+import { ArvoPoolCreation } from "./ArvoPoolCreation.sol";
+import { ArvoAcquisitionEscrow } from "./ArvoAcquisitionEscrow.sol";
 
 contract ArvoStaking is
     Initializable,
@@ -102,6 +103,18 @@ contract ArvoStaking is
     mapping(uint32 => uint8) public poolProducts;
     mapping(uint32 => uint256) public minArvoForUsdc;
     mapping(uint32 => uint8) public poolVisibility; // 0 hidden, 1 opening soon, 2 published
+
+    // Append-only. Acquisition pools use isolated custody and future USDC
+    // reward commitments. Existing pool/position structs are never changed.
+    ArvoAcquisitionEscrow public acquisitionEscrow;
+    mapping(uint32 => bool) public acquisitionPools;
+    uint256 public acquisitionUsdcPrincipal;
+    uint256 public acquisitionUsdcRewards;
+    uint256 public acquisitionUsdcBudget;
+    error AcquisitionConfigurationLocked();
+    error AcquisitionRolloverDisabled();
+    event AcquisitionPoolConfigured(uint32 indexed poolId, address indexed treasury);
+    event AcquisitionRewardLimitAdded(uint32 indexed poolId, uint256 amount);
 
     error InvalidPrice();
     error RewardBelowMinimum();
@@ -373,6 +386,12 @@ contract ArvoStaking is
 
         arvoPrincipalLiability += arvoAmount;
         usdcPrincipalLiability += usdcAmount;
+        if (acquisitionPools[vaultId]) {
+            acquisitionUsdcPrincipal += usdcAmount;
+            acquisitionUsdcRewards += usdcReward;
+            if (usdcAmount != 0) usdc.safeTransfer(address(acquisitionEscrow), usdcAmount);
+            acquisitionEscrow.recordDeposit(vaultId, usdcAmount, maturesAt);
+        }
 
         /*
          * Convert the position's reward from uncommitted pool reserve
@@ -415,64 +434,7 @@ contract ArvoStaking is
         nonReentrant
         returns (uint256 arvoPaid, uint256 usdcPaid)
     {
-        ArvoStakingTypes.Position storage userPosition = _positions[positionId];
-
-        if (userPosition.owner == address(0)) {
-            revert InvalidPosition();
-        }
-
-        if (userPosition.owner != msg.sender) {
-            revert NotPositionOwner();
-        }
-
-        if (userPosition.settled) {
-            revert PositionAlreadySettled();
-        }
-
-        if (block.timestamp < userPosition.maturesAt) {
-            revert PositionNotMatured();
-        }
-
-        uint256 arvoPrincipal = userPosition.arvoPrincipal;
-        uint256 usdcPrincipal = userPosition.usdcPrincipal;
-        uint256 arvoReward = userPosition.arvoReward;
-        uint256 usdcReward = userPosition.usdcReward;
-        uint32 vaultId = userPosition.vaultId;
-
-        uint64 settledAt = block.timestamp.toUint64();
-
-        /*
-         * Effects are applied before any external token transfer.
-         *
-         * Once this state transition completes, the position cannot be
-         * settled again even if a token invokes unexpected external code.
-         */
-        userPosition.settled = true;
-        userPosition.settledAt = settledAt;
-
-        arvoPrincipalLiability -= arvoPrincipal;
-        usdcPrincipalLiability -= usdcPrincipal;
-
-        arvoRewardLiability -= arvoReward;
-        usdcRewardLiability -= usdcReward;
-
-        vaultArvoPrincipal[vaultId] -= arvoPrincipal;
-        vaultUsdcPrincipal[vaultId] -= usdcPrincipal;
-
-        arvoPaid = arvoPrincipal + arvoReward;
-        usdcPaid = usdcPrincipal + usdcReward;
-
-        if (arvoPaid != 0) {
-            arvo.safeTransfer(msg.sender, arvoPaid);
-        }
-
-        if (usdcPaid != 0) {
-            usdc.safeTransfer(msg.sender, usdcPaid);
-        }
-
-        emit PositionClaimed(
-            positionId, msg.sender, arvoPrincipal, usdcPrincipal, arvoReward, usdcReward, settledAt
-        );
+        return _settleCashPosition(positionId,false);
     }
 
     /// @notice Allows the owner of an unmatured position to recover principal
@@ -484,76 +446,35 @@ contract ArvoStaking is
         nonReentrant
         returns (uint256 arvoPaid, uint256 usdcPaid)
     {
-        if (!paused()) {
-            revert EmergencyExitOnlyWhilePaused();
-        }
+        return _settleCashPosition(positionId,true);
+    }
 
-        ArvoStakingTypes.Position storage userPosition = _positions[positionId];
-
-        if (userPosition.owner == address(0)) {
-            revert InvalidPosition();
-        }
-
-        if (userPosition.owner != msg.sender) {
-            revert NotPositionOwner();
-        }
-
-        if (userPosition.settled) {
-            revert PositionAlreadySettled();
-        }
-
-        /*
-         * Matured positions retain their normal claim rights, including
-         * earned rewards, even while the protocol is paused.
-         */
-        if (block.timestamp >= userPosition.maturesAt) {
-            revert EmergencyExitPositionMatured();
-        }
-
-        uint256 arvoPrincipal = userPosition.arvoPrincipal;
-        uint256 usdcPrincipal = userPosition.usdcPrincipal;
-        uint256 arvoRewardForfeited = userPosition.arvoReward;
-        uint256 usdcRewardForfeited = userPosition.usdcReward;
-        uint32 vaultId = userPosition.vaultId;
-
-        uint64 settledAt = block.timestamp.toUint64();
-
-        /*
-         * Apply all accounting effects before external token transfers.
-         */
-        userPosition.settled = true;
-        userPosition.emergencyExit = true;
-        userPosition.settledAt = settledAt;
-
-        arvoPrincipalLiability -= arvoPrincipal;
-        usdcPrincipalLiability -= usdcPrincipal;
-
-        arvoRewardLiability -= arvoRewardForfeited;
-        usdcRewardLiability -= usdcRewardForfeited;
-
-        vaultArvoPrincipal[vaultId] -= arvoPrincipal;
-        vaultUsdcPrincipal[vaultId] -= usdcPrincipal;
-
-        arvoPaid = arvoPrincipal;
-        usdcPaid = usdcPrincipal;
-
-        if (arvoPaid != 0) {
-            arvo.safeTransfer(msg.sender, arvoPaid);
-        }
-
-        if (usdcPaid != 0) {
-            usdc.safeTransfer(msg.sender, usdcPaid);
-        }
-
-        emit EmergencyExited(
-            positionId,
-            msg.sender,
-            arvoPrincipal,
-            usdcPrincipal,
-            arvoRewardForfeited,
-            usdcRewardForfeited,
-            settledAt
-        );
+    // Shared settlement accounting preserves legacy claim and emergency rules.
+    function _settleCashPosition(uint256 positionId,bool emergency)
+        internal returns(uint256 arvoPaid,uint256 usdcPaid) {
+        if(emergency && !paused()) revert EmergencyExitOnlyWhilePaused();
+        ArvoStakingTypes.Position storage p=_positions[positionId];
+        if(p.owner==address(0)) revert InvalidPosition();
+        if(p.owner!=msg.sender) revert NotPositionOwner();
+        if(p.settled) revert PositionAlreadySettled();
+        if(emergency) {
+            if(block.timestamp>=p.maturesAt) revert EmergencyExitPositionMatured();
+        } else if(block.timestamp<p.maturesAt) revert PositionNotMatured();
+        uint32 poolId=p.vaultId;
+        uint256 ap=p.arvoPrincipal; uint256 up=p.usdcPrincipal;
+        uint256 ar=p.arvoReward; uint256 ur=p.usdcReward;
+        uint64 nowAt=block.timestamp.toUint64();
+        p.settled=true; p.settledAt=nowAt;
+        if(emergency) p.emergencyExit=true;
+        arvoPrincipalLiability-=ap; usdcPrincipalLiability-=up;
+        arvoRewardLiability-=ar; usdcRewardLiability-=ur;
+        vaultArvoPrincipal[poolId]-=ap; vaultUsdcPrincipal[poolId]-=up;
+        arvoPaid=ap+(emergency?0:ar); usdcPaid=up+(emergency?0:ur);
+        if(arvoPaid!=0) arvo.safeTransfer(msg.sender,arvoPaid);
+        if(acquisitionPools[poolId]) _settleAcquisition(poolId,up,ur,usdcPaid);
+        else if(usdcPaid!=0) usdc.safeTransfer(msg.sender,usdcPaid);
+        if(emergency) emit EmergencyExited(positionId,msg.sender,ap,up,ar,ur,nowAt);
+        else emit PositionClaimed(positionId,msg.sender,ap,up,ar,ur,nowAt);
     }
 
     /// @notice Rolls a matured position's principal into a new pool while paying
@@ -565,6 +486,10 @@ contract ArvoStaking is
         ArvoStakingTypes.RewardMode rewardMode)
         external nonReentrant whenNotPaused returns (uint256 newPositionId) {
         ArvoStakingTypes.Position storage oldPosition = _positions[positionId];
+
+        if (acquisitionPools[oldPosition.vaultId] || acquisitionPools[destinationVaultId]) {
+            revert AcquisitionRolloverDisabled();
+        }
 
         if (oldPosition.owner == address(0)) {
             revert InvalidPosition();
@@ -672,6 +597,10 @@ contract ArvoStaking is
         ArvoStakingTypes.RewardMode rewardMode)
         external nonReentrant whenNotPaused returns (uint256 newPositionId) {
         ArvoStakingTypes.Position storage oldPosition = _positions[positionId];
+
+        if (acquisitionPools[oldPosition.vaultId] || acquisitionPools[destinationVaultId]) {
+            revert AcquisitionRolloverDisabled();
+        }
 
         if (oldPosition.owner == address(0)) {
             revert InvalidPosition();
@@ -1009,6 +938,22 @@ contract ArvoStaking is
 
     /// @notice Creates a pool using one of the four protected
     ///         standard Arvo vault definitions.
+
+
+    /// @notice Creates a pool with custom duration and reward economics.
+    ///
+    /// @dev Custom terms are validated by the same safety ceilings as
+    ///      the existing vault configuration.
+
+
+    /// @notice Allows an administrator to close or reopen a pool before
+    ///         its opening time. Once a pool has opened it can only be
+    ///         disabled, never reopened.
+    /// @notice products: bit0 ARVO/ARVO, bit1 ARVO/USDC, bit2 USDC/USDC,
+    /// bit3 DUAL/ARVO, bit4 DUAL/USDC, bit5 DUAL/native mixed rewards.
+    /// Existing pools retain their legacy rules.
+
+
     function createStandardPool(
         ArvoStakingTypes.VaultKind kind,
         uint64 opensAt,
@@ -1021,30 +966,13 @@ contract ArvoStaking is
         bool arvoRewardEnabled,
         bool usdcRewardEnabled
     ) external onlyRole(VAULT_MANAGER_ROLE) returns (uint32 poolId) {
-        if (kind == ArvoStakingTypes.VaultKind.CUSTOM) {
-            revert InvalidConfiguration();
-        }
-
-        ArvoStakingTypes.VaultConfig memory config = _standardVaultConfig(kind);
-
-        /*
-         * Mixed rewards remain deliberately disabled until the oracle
-         * module can perform a genuine value-based ARVO/USDC split.
-         */
-        config.arvoStakeEnabled = arvoStakeEnabled;
-        config.usdcStakeEnabled = usdcStakeEnabled;
-        config.dualStakeEnabled = dualStakeEnabled;
-        config.arvoRewardEnabled = arvoRewardEnabled;
-        config.usdcRewardEnabled = usdcRewardEnabled;
-        config.mixedRewardEnabled = false;
-
-        poolId = _createPool(kind, config, opensAt, closesAt, maxArvoPrincipal, maxUsdcPrincipal);
+        ArvoStakingTypes.VaultConfig memory config;
+        uint8 flags=(arvoStakeEnabled?1:0)|(usdcStakeEnabled?2:0)|(dualStakeEnabled?4:0)
+            |(arvoRewardEnabled?8:0)|(usdcRewardEnabled?16:0);
+        poolId=_createPoolTerms(ArvoPoolCreation.Terms(kind,config,opensAt,closesAt,
+            maxArvoPrincipal,maxUsdcPrincipal,flags,0,0));
     }
 
-    /// @notice Creates a pool with custom duration and reward economics.
-    ///
-    /// @dev Custom terms are validated by the same safety ceilings as
-    ///      the existing vault configuration.
     function createCustomPool(
         ArvoStakingTypes.VaultConfig calldata customConfig,
         uint64 opensAt,
@@ -1052,58 +980,23 @@ contract ArvoStaking is
         uint256 maxArvoPrincipal,
         uint256 maxUsdcPrincipal
     ) external onlyRole(VAULT_MANAGER_ROLE) returns (uint32 poolId) {
-        _validateVaultConfiguration(customConfig);
-
-        ArvoStakingTypes.VaultConfig memory config = customConfig;
-
-        /*
-         * Until the oracle module is introduced, custom pools cannot
-         * expose MIXED rewards either.
-         */
-        config.mixedRewardEnabled = false;
-
-        poolId = _createPool(
-            ArvoStakingTypes.VaultKind.CUSTOM,
-            config,
-            opensAt,
-            closesAt,
-            maxArvoPrincipal,
-            maxUsdcPrincipal
-        );
+        poolId=_createPoolTerms(ArvoPoolCreation.Terms(ArvoStakingTypes.VaultKind.CUSTOM,
+            customConfig,opensAt,closesAt,maxArvoPrincipal,maxUsdcPrincipal,0,0,1));
     }
 
-    /// @notice Allows an administrator to close or reopen a pool before
-    ///         its opening time. Once a pool has opened it can only be
-    ///         disabled, never reopened.
-    /// @notice products: bit0 ARVO/ARVO, bit1 ARVO/USDC, bit2 USDC/USDC,
-    /// bit3 DUAL/ARVO, bit4 DUAL/USDC. Existing pools retain their legacy rules.
     function createProductPool(ArvoStakingTypes.VaultKind kind,
         ArvoStakingTypes.VaultConfig calldata customConfig,
         uint64 opensAt, uint64 closesAt, uint256 maxArvoPrincipal,
         uint256 maxUsdcPrincipal, uint8 products, uint256 crossMinimum)
         external onlyRole(VAULT_MANAGER_ROLE) returns (uint32 poolId)
     {
-        if (products == 0 || products > 31) revert InvalidConfiguration();
-        ArvoStakingTypes.VaultConfig memory config;
-        if (kind == ArvoStakingTypes.VaultKind.CUSTOM) {
-            _validateVaultConfiguration(customConfig);
-            config = customConfig;
-        } else {
-            config = _standardVaultConfig(kind);
-            if ((products & 2) != 0 && crossMinimum != 150_000 ether) revert InvalidConfiguration();
-        }
-        if ((products & 2) != 0 && (crossMinimum == 0 || crossMinimum < config.minArvo)) revert InvalidConfiguration();
-        config.arvoStakeEnabled = (products & 3) != 0;
-        config.usdcStakeEnabled = (products & 4) != 0;
-        config.dualStakeEnabled = (products & 24) != 0;
-        config.arvoRewardEnabled = (products & 9) != 0;
-        config.usdcRewardEnabled = (products & 22) != 0;
-        config.mixedRewardEnabled = false;
-        if ((config.arvoStakeEnabled || config.dualStakeEnabled) && config.minArvo == 0) revert InvalidConfiguration();
-        if ((config.usdcStakeEnabled || config.dualStakeEnabled) && config.minUsdc == 0) revert InvalidConfiguration();
-        poolId = _createPool(kind, config, opensAt, closesAt, maxArvoPrincipal, maxUsdcPrincipal);
-        poolProducts[poolId] = products;
-        minArvoForUsdc[poolId] = crossMinimum;
+        poolId=_createPoolTerms(ArvoPoolCreation.Terms(kind,customConfig,opensAt,closesAt,
+            maxArvoPrincipal,maxUsdcPrincipal,products,crossMinimum,2));
+    }
+
+    function _createPoolTerms(ArvoPoolCreation.Terms memory terms) internal returns(uint32 poolId) {
+        poolId=nextVaultId++;
+        ArvoPoolCreation.create(_vaults,_vaultExists,_pools,_poolExists,poolProducts,minArvoForUsdc,poolId,terms);
     }
 
     function setPoolVisibility(uint32 poolId, uint8 visibility) external onlyRole(VAULT_MANAGER_ROLE) {
@@ -1159,6 +1052,7 @@ contract ArvoStaking is
         else if (stakeMode == ArvoStakingTypes.StakeMode.DUAL) {
             if (rewardMode == ArvoStakingTypes.RewardMode.ARVO) bit = 8;
             else if (rewardMode == ArvoStakingTypes.RewardMode.USDC) bit = 16;
+            else if (rewardMode == ArvoStakingTypes.RewardMode.MIXED) bit = 32;
         }
         if ((products & bit) == 0) revert ProductDisabled();
     }
@@ -1217,6 +1111,7 @@ contract ArvoStaking is
             revert InsufficientRewardReserve();
         }
 
+        if (usdcAmount != 0 && acquisitionPools[poolId]) revert AcquisitionConfigurationLocked();
         if (usdcAmount > availableUsdcRewardCapacity()) {
             revert InsufficientRewardReserve();
         }
@@ -1234,6 +1129,50 @@ contract ArvoStaking is
         }
 
         emit PoolRewardBudgetReserved(poolId, arvoAmount, usdcAmount);
+    }
+
+    /// @notice Binds the acquisition module once. Deploy it with this proxy
+    /// as controller and the same USDC token. Cannot be replaced through admin.
+    function configureAcquisitionEscrow(ArvoAcquisitionEscrow escrow)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        if (address(acquisitionEscrow) != address(0) || address(escrow).code.length == 0
+            || escrow.controller() != address(this) || address(escrow.usdc()) != address(usdc)) {
+            revert AcquisitionConfigurationLocked();
+        }
+        acquisitionEscrow = escrow;
+    }
+
+    /// @notice Permanently opts a NEW pool into acquisition custody.
+    /// @dev Rejects opened pools, existing positions and prefunded USDC budgets.
+    function configureAcquisitionPool(uint32 poolId, address treasury)
+        external onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        ArvoStakingTypes.PoolConfig storage pc = _pools[poolId];
+        ArvoStakingTypes.VaultConfig storage vc = _vaults[poolId];
+        if (address(acquisitionEscrow) == address(0) || !_poolExists[poolId]
+            || pc.finalized || block.timestamp >= pc.opensAt || acquisitionPools[poolId]
+            || pc.usdcRewardBudget != 0 || pc.maxUsdcPrincipal == 0
+            || !(vc.usdcStakeEnabled || vc.dualStakeEnabled)) {
+            revert AcquisitionConfigurationLocked();
+        }
+        acquisitionPools[poolId] = true;
+        acquisitionEscrow.configure(poolId, treasury, pc.opensAt);
+        emit AcquisitionPoolConfigured(poolId, treasury);
+    }
+
+    /// @notice Defines future USDC obligations, NOT an already funded reserve.
+    function addAcquisitionRewardLimit(uint32 poolId, uint256 amount)
+        external onlyRole(REWARD_MANAGER_ROLE)
+    {
+        ArvoStakingTypes.PoolConfig storage pc = _pools[poolId];
+        if (!acquisitionPools[poolId] || pc.finalized || block.timestamp >= pc.opensAt) revert PoolBudgetLocked();
+        if (amount == 0) revert InvalidAmount();
+        pc.usdcRewardBudget += amount;
+        pc.usdcRewardBudgetRemaining += amount;
+        usdcRewardBudgetReserved += amount;
+        acquisitionUsdcBudget += amount;
+        emit AcquisitionRewardLimitAdded(poolId, amount);
     }
 
     /// @notice Permanently allocates unused pool capacity to the protocol.
@@ -1331,10 +1270,12 @@ contract ArvoStaking is
         if (releasedUsdc != 0) {
             poolConfig.usdcRewardBudgetRemaining = 0;
             usdcRewardBudgetReserved -= releasedUsdc;
+            if (acquisitionPools[poolId]) acquisitionUsdcBudget -= releasedUsdc;
         }
 
         poolConfig.enabled = false;
         poolConfig.finalized = true;
+        if (acquisitionPools[poolId]) acquisitionEscrow.finalize(poolId);
 
         emit PoolStatusChanged(poolId, false);
 
@@ -1384,7 +1325,7 @@ contract ArvoStaking is
             revert InvalidConfiguration();
         }
 
-        return _standardVaultConfig(kind);
+        return ArvoPoolCreation.standard(kind);
     }
 
     function position(uint256 positionId) external view returns (ArvoStakingTypes.Position memory) {
@@ -1421,8 +1362,11 @@ contract ArvoStaking is
     }
 
     function availableUsdcRewardCapacity() public view returns (uint256) {
-        uint256 protectedAssets =
-            usdcPrincipalLiability + usdcRewardLiability + usdcRewardBudgetReserved;
+        // Acquisition cash is physically isolated in its escrow. Only ordinary
+        // liabilities and cash-backed budgets are protected by this balance.
+        uint256 protectedAssets = usdcPrincipalLiability - acquisitionUsdcPrincipal
+            + usdcRewardLiability - acquisitionUsdcRewards
+            + usdcRewardBudgetReserved - acquisitionUsdcBudget;
 
         uint256 balance = usdc.balanceOf(address(this));
 
@@ -1439,7 +1383,8 @@ contract ArvoStaking is
     }
 
     function isUsdcSolvent() external view returns (bool) {
-        return usdc.balanceOf(address(this))
+        uint256 acquisitionCash = address(acquisitionEscrow) == address(0) ? 0 : acquisitionEscrow.totalCash();
+        return usdc.balanceOf(address(this)) + acquisitionCash
             >= usdcPrincipalLiability + usdcRewardLiability + usdcRewardBudgetReserved;
     }
 
@@ -1449,73 +1394,11 @@ contract ArvoStaking is
      * =============================================================
      */
 
-    function _createPool(
-        ArvoStakingTypes.VaultKind kind,
-        ArvoStakingTypes.VaultConfig memory config,
-        uint64 opensAt,
-        uint64 closesAt,
-        uint256 maxArvoPrincipal,
-        uint256 maxUsdcPrincipal
-    ) internal returns (uint32 poolId) {
-        if (opensAt < block.timestamp) {
-            revert InvalidPoolWindow();
-        }
+    /// @dev Self-only common storage writer avoids duplicating pool creation
+    /// bytecode across factories. External callers cannot reach this path.
 
-        if (closesAt != 0 && closesAt <= opensAt) {
-            revert InvalidPoolWindow();
-        }
 
-        poolId = nextVaultId++;
 
-        _vaults[poolId] = config;
-        _vaultExists[poolId] = true;
-
-        _pools[poolId] = ArvoStakingTypes.PoolConfig({
-            kind: kind,
-            opensAt: opensAt,
-            closesAt: closesAt,
-            maxArvoPrincipal: maxArvoPrincipal,
-            maxUsdcPrincipal: maxUsdcPrincipal,
-            arvoRewardBudget: 0,
-            usdcRewardBudget: 0,
-            arvoRewardBudgetRemaining: 0,
-            usdcRewardBudgetRemaining: 0,
-            protocolArvoAllocation: 0,
-            protocolUsdcAllocation: 0,
-            enabled: true,
-            finalized: false
-        });
-
-        _poolExists[poolId] = true;
-
-        emit VaultCreated(poolId);
-        emit VaultConfigured(poolId);
-        emit PoolCreated(poolId, kind, opensAt, closesAt);
-    }
-
-    function _standardVaultConfig(ArvoStakingTypes.VaultKind kind)
-        internal
-        pure
-        returns (ArvoStakingTypes.VaultConfig memory config)
-    {
-        if (kind == ArvoStakingTypes.VaultKind.BUILD) {
-            return ArvoVaultDefaults.build();
-        }
-
-        if (kind == ArvoStakingTypes.VaultKind.ADVANCE) {
-            return ArvoVaultDefaults.advance();
-        }
-
-        if (kind == ArvoStakingTypes.VaultKind.COMPOUND) {
-            return ArvoVaultDefaults.compound();
-        }
-
-        if (kind == ArvoStakingTypes.VaultKind.FOUNDATION) {
-            return ArvoVaultDefaults.foundation();
-        }
-
-        revert InvalidConfiguration();
-    }
 
     function _getVault(uint32 vaultId)
         internal
@@ -1533,73 +1416,9 @@ contract ArvoStaking is
         }
     }
 
-    function _validateStake(
-        ArvoStakingTypes.VaultConfig memory config,
-        ArvoStakingTypes.StakeMode stakeMode,
-        uint256 arvoAmount,
-        uint256 usdcAmount
-    ) internal pure {
-        if (stakeMode == ArvoStakingTypes.StakeMode.ARVO) {
-            if (!config.arvoStakeEnabled) {
-                revert StakeModeDisabled();
-            }
 
-            if (arvoAmount == 0 || usdcAmount != 0) {
-                revert InvalidAmount();
-            }
 
-            if (arvoAmount < config.minArvo) {
-                revert BelowMinimum();
-            }
 
-            return;
-        }
-
-        if (stakeMode == ArvoStakingTypes.StakeMode.USDC) {
-            if (!config.usdcStakeEnabled) {
-                revert StakeModeDisabled();
-            }
-
-            if (usdcAmount == 0 || arvoAmount != 0) {
-                revert InvalidAmount();
-            }
-
-            if (usdcAmount < config.minUsdc) {
-                revert BelowMinimum();
-            }
-
-            return;
-        }
-
-        if (!config.dualStakeEnabled) {
-            revert StakeModeDisabled();
-        }
-
-        if (arvoAmount == 0 || usdcAmount == 0) {
-            revert InvalidAmount();
-        }
-
-        if (arvoAmount < config.minArvo || usdcAmount < config.minUsdc) {
-            revert BelowMinimum();
-        }
-    }
-
-    function _validateRewardMode(
-        ArvoStakingTypes.VaultConfig memory config,
-        ArvoStakingTypes.RewardMode rewardMode
-    ) internal pure {
-        if (rewardMode == ArvoStakingTypes.RewardMode.ARVO && !config.arvoRewardEnabled) {
-            revert RewardModeDisabled();
-        }
-
-        if (rewardMode == ArvoStakingTypes.RewardMode.USDC && !config.usdcRewardEnabled) {
-            revert RewardModeDisabled();
-        }
-
-        if (rewardMode == ArvoStakingTypes.RewardMode.MIXED && !config.mixedRewardEnabled) {
-            revert RewardModeDisabled();
-        }
-    }
 
     function _validateCapacity(uint32 vaultId, uint256 arvoAmount, uint256 usdcAmount)
         internal
@@ -1673,6 +1492,124 @@ contract ArvoStaking is
         }
     }
 
+
+
+    function _validatePoolOpen(uint32 poolId) internal view {
+        ArvoStakingTypes.PoolConfig storage poolConfig = _pools[poolId];
+
+        if (!poolConfig.enabled || poolConfig.finalized) {
+            revert PoolClosed();
+        }
+
+        if (block.timestamp < poolConfig.opensAt) {
+            revert PoolNotOpen();
+        }
+
+        if (poolConfig.closesAt != 0 && block.timestamp >= poolConfig.closesAt) {
+            revert PoolClosed();
+        }
+    }
+
+    function _requirePoolRewardBudget(uint32 poolId, uint256 arvoReward, uint256 usdcReward)
+        internal
+        view
+    {
+        ArvoStakingTypes.PoolConfig storage poolConfig = _pools[poolId];
+
+        if (arvoReward > poolConfig.arvoRewardBudgetRemaining) {
+            revert InsufficientPoolRewardBudget();
+        }
+
+        if (usdcReward > poolConfig.usdcRewardBudgetRemaining) {
+            revert InsufficientPoolRewardBudget();
+        }
+    }
+
+    function _consumePoolRewardBudget(uint32 poolId, uint256 arvoReward, uint256 usdcReward)
+        internal
+    {
+        ArvoStakingTypes.PoolConfig storage poolConfig = _pools[poolId];
+
+        if (arvoReward != 0) {
+            poolConfig.arvoRewardBudgetRemaining -= arvoReward;
+            arvoRewardBudgetReserved -= arvoReward;
+        }
+
+        if (usdcReward != 0) {
+            poolConfig.usdcRewardBudgetRemaining -= usdcReward;
+            usdcRewardBudgetReserved -= usdcReward;
+            if (acquisitionPools[poolId]) acquisitionUsdcBudget -= usdcReward;
+        }
+    }
+
+    function _validateStake(
+        ArvoStakingTypes.VaultConfig memory config,
+        ArvoStakingTypes.StakeMode stakeMode,
+        uint256 arvoAmount,
+        uint256 usdcAmount
+    ) internal pure {
+        if (stakeMode == ArvoStakingTypes.StakeMode.ARVO) {
+            if (!config.arvoStakeEnabled) {
+                revert StakeModeDisabled();
+            }
+
+            if (arvoAmount == 0 || usdcAmount != 0) {
+                revert InvalidAmount();
+            }
+
+            if (arvoAmount < config.minArvo) {
+                revert BelowMinimum();
+            }
+
+            return;
+        }
+
+        if (stakeMode == ArvoStakingTypes.StakeMode.USDC) {
+            if (!config.usdcStakeEnabled) {
+                revert StakeModeDisabled();
+            }
+
+            if (usdcAmount == 0 || arvoAmount != 0) {
+                revert InvalidAmount();
+            }
+
+            if (usdcAmount < config.minUsdc) {
+                revert BelowMinimum();
+            }
+
+            return;
+        }
+
+        if (!config.dualStakeEnabled) {
+            revert StakeModeDisabled();
+        }
+
+        if (arvoAmount == 0 || usdcAmount == 0) {
+            revert InvalidAmount();
+        }
+
+        if (arvoAmount < config.minArvo || usdcAmount < config.minUsdc) {
+            revert BelowMinimum();
+        }
+    }
+
+    function _validateRewardMode(
+        ArvoStakingTypes.VaultConfig memory config,
+        ArvoStakingTypes.RewardMode rewardMode
+    ) internal pure {
+        if (rewardMode == ArvoStakingTypes.RewardMode.ARVO && !config.arvoRewardEnabled) {
+            revert RewardModeDisabled();
+        }
+
+        if (rewardMode == ArvoStakingTypes.RewardMode.USDC && !config.usdcRewardEnabled) {
+            revert RewardModeDisabled();
+        }
+
+        if (rewardMode == ArvoStakingTypes.RewardMode.MIXED && !config.mixedRewardEnabled) {
+            revert RewardModeDisabled();
+        }
+    }
+
     function _calculateReward(
         ArvoStakingTypes.VaultConfig memory config,
         ArvoStakingTypes.StakeMode stakeMode,
@@ -1737,83 +1674,13 @@ contract ArvoStaking is
             (usdcAmount * config.usdcRewardBps * rewardMultiplier * usdcShare) / (BPS * BPS * BPS);
     }
 
-    function _validatePoolOpen(uint32 poolId) internal view {
-        ArvoStakingTypes.PoolConfig storage poolConfig = _pools[poolId];
-
-        if (!poolConfig.enabled || poolConfig.finalized) {
-            revert PoolClosed();
-        }
-
-        if (block.timestamp < poolConfig.opensAt) {
-            revert PoolNotOpen();
-        }
-
-        if (poolConfig.closesAt != 0 && block.timestamp >= poolConfig.closesAt) {
-            revert PoolClosed();
-        }
+    function _settleAcquisition(uint32 poolId, uint256 principal, uint256 reward, uint256 paid) internal {
+        acquisitionUsdcPrincipal -= principal;
+        acquisitionUsdcRewards -= reward;
+        acquisitionEscrow.settle(poolId, msg.sender, principal, paid);
     }
 
-    function _requirePoolRewardBudget(uint32 poolId, uint256 arvoReward, uint256 usdcReward)
-        internal
-        view
-    {
-        ArvoStakingTypes.PoolConfig storage poolConfig = _pools[poolId];
 
-        if (arvoReward > poolConfig.arvoRewardBudgetRemaining) {
-            revert InsufficientPoolRewardBudget();
-        }
-
-        if (usdcReward > poolConfig.usdcRewardBudgetRemaining) {
-            revert InsufficientPoolRewardBudget();
-        }
-    }
-
-    function _consumePoolRewardBudget(uint32 poolId, uint256 arvoReward, uint256 usdcReward)
-        internal
-    {
-        ArvoStakingTypes.PoolConfig storage poolConfig = _pools[poolId];
-
-        if (arvoReward != 0) {
-            poolConfig.arvoRewardBudgetRemaining -= arvoReward;
-            arvoRewardBudgetReserved -= arvoReward;
-        }
-
-        if (usdcReward != 0) {
-            poolConfig.usdcRewardBudgetRemaining -= usdcReward;
-            usdcRewardBudgetReserved -= usdcReward;
-        }
-    }
-
-    function _validateVaultConfiguration(ArvoStakingTypes.VaultConfig calldata config)
-        internal
-        pure
-    {
-        if (config.duration == 0) {
-            revert InvalidConfiguration();
-        }
-
-        if (config.arvoRewardBps > BPS || config.usdcRewardBps > BPS) {
-            revert InvalidConfiguration();
-        }
-
-        if (config.mixedArvoShareBps > BPS) {
-            revert InvalidConfiguration();
-        }
-
-        /*
-         * Initial safety ceiling.
-         *
-         * This prevents an accidental admin entry such as a
-         * 1,500% boost from immediately becoming valid.
-         */
-        if (config.dualBoostBps > 5_000 || config.combinedBoostCapBps > 5_000) {
-            revert InvalidConfiguration();
-        }
-
-        if (config.dualBoostBps > config.combinedBoostCapBps) {
-            revert InvalidConfiguration();
-        }
-    }
 
     /*
      * Only accept tokens when the contract receives exactly the

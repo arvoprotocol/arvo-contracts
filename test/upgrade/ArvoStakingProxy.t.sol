@@ -25,7 +25,9 @@ contract ArvoStakingProxyTest is Test {
         );
 
         Options memory opts;
-        opts.unsafeAllow = "constructor";
+        // Allow only the reviewed mapping-based factory library; no assembly or
+        // external token calls occur in that library. Keep storage checks enabled.
+        opts.unsafeAllow = "constructor,external-library-linking";
 
         address proxy =
             Upgrades.deployUUPSProxy("ArvoStaking.sol:ArvoStaking", initializerData, opts);
