@@ -8,6 +8,7 @@ import { Options } from "openzeppelin-foundry-upgrades/Options.sol";
 import { ArvoStaking } from "../../src/ArvoStaking.sol";
 import { MockERC20 } from "../../src/mocks/MockERC20.sol";
 import { ArvoStakingV2 } from "./mocks/ArvoStakingV2.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 
 contract ArvoStakingUpgradeTest is Test {
     MockERC20 internal arvoToken;
@@ -31,8 +32,10 @@ contract ArvoStakingUpgradeTest is Test {
         // external token calls occur in that library. Keep storage checks enabled.
         opts.unsafeAllow = "constructor,external-library-linking";
 
-        address proxy =
-            Upgrades.deployUUPSProxy("ArvoStaking.sol:ArvoStaking", initializerData, opts);
+        // Forge links Solidity creation expressions; getCode cannot load an
+        // unlinked library artifact. Validation remains enabled separately.
+        Upgrades.validateImplementation("ArvoStaking.sol:ArvoStaking",opts);
+        address proxy = address(new ERC1967Proxy(address(new ArvoStaking()),initializerData));
 
         staking = ArvoStaking(proxy);
     }
@@ -59,13 +62,10 @@ contract ArvoStakingUpgradeTest is Test {
         // external token calls occur in that library. Keep storage checks enabled.
         opts.unsafeAllow = "constructor,external-library-linking";
 
-        Upgrades.upgradeProxy(
-            address(staking),
-            "test/upgrade/mocks/ArvoStakingV2.sol:ArvoStakingV2",
-            bytes(""),
-            opts,
-            admin
-        );
+        Upgrades.validateUpgrade("test/upgrade/mocks/ArvoStakingV2.sol:ArvoStakingV2",opts);
+        ArvoStakingV2 next = new ArvoStakingV2();
+        vm.prank(admin);
+        staking.upgradeToAndCall(address(next),"");
 
         address implementationAfter = Upgrades.getImplementationAddress(address(staking));
 

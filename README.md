@@ -1,5 +1,11 @@
 # ARVO staking contracts
 
+Post-audit changes and remaining operational items are recorded in
+[AUDIT-REMEDIATION.md](AUDIT-REMEDIATION.md). Recheck a clean build before any
+deployment. For the already-upgraded testnet proxy, the new entry point is
+`UpgradeArvoAuditTestnet.s.sol`; the older acquisition installer targets the
+pre-acquisition implementation and must not be rerun on the current deployment.
+
 Upgradeable staking implementation, vault creation library, acquisition escrow,
 deployment/governance scripts and Foundry tests. The app is maintained separately
 in `arvoprotocol/arvo-app`.

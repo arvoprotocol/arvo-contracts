@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24;
+pragma solidity 0.8.35;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
@@ -38,6 +38,10 @@ contract ArvoAcquisitionEscrow is ReentrancyGuard {
     event Repaid(uint32 indexed poolId,address indexed payer,uint256 amount,uint256 outstandingPrincipal);
     event ProjectLinked(uint32 indexed poolId,bytes32 indexed projectId);
     event ExcessWithdrawn(uint32 indexed poolId,address indexed treasury,uint256 amount);
+    event Configured(uint32 indexed poolId,address indexed treasury,uint64 opensAt);
+    event Deposited(uint32 indexed poolId,uint256 principal,uint64 maturity);
+    event Settled(uint32 indexed poolId,address indexed owner,uint256 principal,uint256 paid);
+    event Finalized(uint32 indexed poolId);
     constructor(address staking,address token) {
         if (staking.code.length==0 || token.code.length==0
             || address(IAcquisitionController(staking).usdc())!=token) revert InvalidConfiguration();
@@ -54,6 +58,7 @@ contract ArvoAcquisitionEscrow is ReentrancyGuard {
         if(accounts[poolId].treasury!=address(0) || treasury.code.length==0
             || treasury==controller || treasury==address(this) || opensAt<=block.timestamp) revert InvalidConfiguration();
         accounts[poolId].treasury=treasury; accounts[poolId].opensAt=opensAt;
+        emit Configured(poolId,treasury,opensAt);
     }
     /// @notice Optional immutable canonical project ID hash. It conveys no equity
     /// and cannot enforce external treasury spending after USDC leaves this escrow.
@@ -71,6 +76,7 @@ contract ArvoAcquisitionEscrow is ReentrancyGuard {
         if(usdc.balanceOf(address(this)) < totalCash+amount) revert UnexpectedTokenTransfer();
         a.cash+=amount; totalCash+=amount; a.principal+=amount; a.activePositions++;
         if(a.firstMaturity==0 || maturity<a.firstMaturity) a.firstMaturity=maturity;
+        emit Deposited(poolId,amount,maturity);
     }
     /// @notice Only liquid principal from this pool, to its fixed reviewed treasury.
     /// @dev No maturity cutoff: Treasury may release available principal at any time.
@@ -105,8 +111,12 @@ contract ArvoAcquisitionEscrow is ReentrancyGuard {
             || paid>a.cash || a.outstandingPrincipal>a.principal-principal) revert LiquidityUnavailable();
         a.principal-=principal; a.activePositions--; a.cash-=paid; totalCash-=paid;
         if(paid!=0) usdc.safeTransfer(owner,paid);
+        emit Settled(poolId,owner,principal,paid);
     }
-    function finalize(uint32 poolId) external onlyController { accounts[poolId].finalized=true; }
+    function finalize(uint32 poolId) external onlyController {
+        accounts[poolId].finalized=true;
+        emit Finalized(poolId);
+    }
     /// @notice No excess can leave until every position is settled, debt is zero,
     /// and deposit-window finalization prevents creating new obligations.
     function withdrawExcess(uint32 poolId,uint256 amount)

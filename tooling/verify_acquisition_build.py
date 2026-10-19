@@ -6,7 +6,7 @@ root=Path(__file__).resolve().parents[1]
 def artifact(file,name):
     return json.loads((root/'out'/file/(name+'.json')).read_text())
 new=artifact('ArvoStaking.sol','ArvoStaking')
-old=artifact('ArvoStakingTestnetV1.sol','ArvoStakingTestnetV1')
+old=artifact('ArvoStakingAuditedV1.sol','ArvoStakingAuditedV1')
 escrow=artifact('ArvoAcquisitionEscrow.sol','ArvoAcquisitionEscrow')
 factory=artifact('ArvoPoolCreation.sol','ArvoPoolCreation')
 def shape(types,key):
@@ -40,5 +40,5 @@ for name,item in [('staking',new),('escrow',escrow),('factory',factory)]:
     size=len(bytecode)//2
     assert size<=24576,f'{name} exceeds EIP-170: {size}'
     print(f'PASS: {name} runtime {size:,} / 24,576 bytes')
-print('PASS: exact reviewed testnet-v1 storage prefix and existing public ABI preserved')
+print('PASS: audited ca8b3d2 storage prefix and existing public ABI preserved')
 print('No deployment, transactions, files, balances or services changed.')
