@@ -1,0 +1,52 @@
+                   
+                   
+┌─────────────────┐
+│ 6 Code Findings │
+└─────────────────┘
+                                       
+    src/bonus/ArvoFirstEditionBonus.sol
+     ❱ home.claude.tools.semgrep-smart-contracts.solidity.performance.non-payable-constructor
+          ❰❰ Blocking ❱❱
+          Consider making costructor payable to save gas.
+                                                         
+           95┆ constructor(
+           96┆     IArvoStakingBonusView staking_,
+           97┆     uint32 poolId_,
+           98┆     uint256 bonusPot_,
+           99┆     address treasury_,
+          100┆     uint64 claimGracePeriod
+          101┆ ) {
+          102┆     if (address(staking_) == address(0) || treasury_ == address(0) || bonusPot_ == 0) {
+          103┆         revert InvalidConfiguration();
+          104┆     }
+             [hid 37 additional lines, adjust with --max-lines-per-finding] 
+   
+     ❱ home.claude.tools.semgrep-smart-contracts.solidity.performance.use-nested-if
+          ❰❰ Blocking ❱❱
+          Using nested is cheaper than using && multiple check combinations.  There are more advantages, such
+          as easier to read code and better coverage reports.                                                
+                                                                                                             
+          166┆ if (!snapshotTaken && block.timestamp >= earliestMaturity) return 0;
+   
+     ❱ home.claude.tools.semgrep-smart-contracts.solidity.performance.inefficient-state-variable-increment
+          ❰❰ Blocking ❱❱
+          <x> += <y> costs more gas than <x> = <x> + <y> for state variables.
+                                                                             
+          190┆ totalClaimed += amount;
+   
+     ❱ home.claude.tools.semgrep-smart-contracts.solidity.performance.unnecessary-checked-arithmetic-in-loop
+          ❰❰ Blocking ❱❱
+          A lot of times there is no risk that the loop counter can overflow.  Using Solidity's unchecked
+          block saves the overflow checks.                                                               
+                                                                                                         
+          198┆ for (uint256 i; i < positionIds.length; ++i) {
+   
+     ❱ home.claude.tools.semgrep-smart-contracts.solidity.performance.use-nested-if
+          ❰❰ Blocking ❱❱
+          Using nested is cheaper than using && multiple check combinations.  There are more advantages, such
+          as easier to read code and better coverage reports.                                                
+                                                                                                             
+          205┆ if (snapshotTaken && totalEligible == 0) return 0;
+            ⋮┆----------------------------------------
+          208┆ if (!snapshotTaken && block.timestamp >= earliestMaturity) return 0;
+

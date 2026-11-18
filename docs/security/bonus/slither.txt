@@ -1,0 +1,188 @@
+--ignore-compile used, if something goes wrong, consider removing the ignore compile flag
+'forge config --json' running
+INFO:Detectors:
+Detector: calls-loop
+ArvoFirstEditionBonus.claim(uint256) (src/bonus/ArvoFirstEditionBonus.sol#176-194) has external calls inside a loop: p = staking.position(positionId) (src/bonus/ArvoFirstEditionBonus.sol#181)
+	Calls stack containing the loop:
+		ArvoFirstEditionBonus.claimMany(uint256[])
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation/#calls-inside-a-loop
+INFO:Detectors:
+Detector: timestamp
+ArvoFirstEditionBonus.constructor(IArvoStakingBonusView,uint32,uint256,address,uint64) (src/bonus/ArvoFirstEditionBonus.sol#95-141) uses timestamp for comparisons
+	Dangerous comparisons:
+	- p.closesAt == 0 || p.finalized || block.timestamp >= p.opensAt (src/bonus/ArvoFirstEditionBonus.sol#114)
+ArvoFirstEditionBonus.snapshot() (src/bonus/ArvoFirstEditionBonus.sol#145-159) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp < closesAt (src/bonus/ArvoFirstEditionBonus.sol#147)
+	- block.timestamp >= earliestMaturity (src/bonus/ArvoFirstEditionBonus.sol#148)
+ArvoFirstEditionBonus.bonusFor(uint256) (src/bonus/ArvoFirstEditionBonus.sol#164-173) uses timestamp for comparisons
+	Dangerous comparisons:
+	- claimed[positionId] || block.timestamp >= claimDeadline (src/bonus/ArvoFirstEditionBonus.sol#165)
+	- ! snapshotTaken && block.timestamp >= earliestMaturity (src/bonus/ArvoFirstEditionBonus.sol#166)
+ArvoFirstEditionBonus.claim(uint256) (src/bonus/ArvoFirstEditionBonus.sol#176-194) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= claimDeadline (src/bonus/ArvoFirstEditionBonus.sol#178)
+	- block.timestamp < p.maturesAt (src/bonus/ArvoFirstEditionBonus.sol#186)
+ArvoFirstEditionBonus.outstanding() (src/bonus/ArvoFirstEditionBonus.sol#204-210) uses timestamp for comparisons
+	Dangerous comparisons:
+	- block.timestamp >= claimDeadline (src/bonus/ArvoFirstEditionBonus.sol#206)
+	- ! snapshotTaken && block.timestamp >= earliestMaturity (src/bonus/ArvoFirstEditionBonus.sol#208)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#block-timestamp
+INFO:Detectors:
+Detector: pragma
+13 different versions of Solidity are used:
+	- Version constraint >=0.8.13<0.9.0 is used by:
+		->=0.8.13<0.9.0 (lib/forge-std/src/Base.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/Script.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdAssertions.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdChains.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdCheats.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdConstants.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdError.sol#3)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdInvariant.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdJson.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdMath.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdStorage.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdStyle.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdToml.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/StdUtils.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/Test.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/Vm.sol#4)
+		->=0.8.13<0.9.0 (lib/forge-std/src/console.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/console2.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/interfaces/IMulticall3.sol#2)
+		->=0.8.13<0.9.0 (lib/forge-std/src/safeconsole.sol#2)
+	- Version constraint ^0.8.20 is used by:
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/contracts/access/AccessControlUpgradeable.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/contracts/proxy/utils/Initializable.sol#3)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/contracts/utils/ContextUpgradeable.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/contracts/utils/PausableUpgradeable.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/contracts/utils/introspection/ERC165Upgradeable.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/access/AccessControl.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/access/Ownable.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/governance/TimelockController.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/Proxy.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/beacon/UpgradeableBeacon.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/utils/Initializable.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC1155/utils/ERC1155Holder.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC20/ERC20.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC721/utils/ERC721Holder.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/Address.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/Context.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/Errors.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/LowLevelCall.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/Panic.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/StorageSlot.sol#5)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/introspection/ERC165.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/math/Math.sol#4)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/math/SafeCast.sol#5)
+		-^0.8.20 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/math/SignedMath.sol#4)
+		-^0.8.20 (lib/openzeppelin-foundry-upgrades/src/Upgrades.sol#2)
+	- Version constraint ^0.8.22 is used by:
+		-^0.8.22 (lib/openzeppelin-contracts-upgradeable/contracts/proxy/utils/UUPSUpgradeable.sol#3)
+		-^0.8.22 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Proxy.sol#4)
+		-^0.8.22 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/beacon/BeaconProxy.sol#4)
+		-^0.8.22 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/transparent/ProxyAdmin.sol#4)
+		-^0.8.22 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/transparent/TransparentUpgradeableProxy.sol#4)
+		-^0.8.22 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/utils/UUPSUpgradeable.sol#4)
+	- Version constraint >=0.8.4 is used by:
+		->=0.8.4 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/access/IAccessControl.sol#4)
+		->=0.8.4 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/draft-IERC6093.sol#4)
+	- Version constraint >=0.6.2 is used by:
+		->=0.6.2 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/IERC1363.sol#4)
+		->=0.6.2 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/IERC20Metadata.sol#4)
+		->=0.6.2 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC1155/IERC1155Receiver.sol#4)
+		->=0.6.2 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC20/extensions/IERC20Metadata.sol#4)
+	- Version constraint >=0.4.16 is used by:
+		->=0.4.16 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/IERC165.sol#4)
+		->=0.4.16 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/IERC20.sol#4)
+		->=0.4.16 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/draft-IERC1822.sol#4)
+		->=0.4.16 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/beacon/IBeacon.sol#4)
+		->=0.4.16 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol#4)
+		->=0.4.16 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/introspection/IERC165.sol#4)
+	- Version constraint >=0.4.11 is used by:
+		->=0.4.11 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/interfaces/IERC1967.sol#4)
+	- Version constraint ^0.8.21 is used by:
+		-^0.8.21 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/proxy/ERC1967/ERC1967Utils.sol#4)
+	- Version constraint >=0.5.0 is used by:
+		->=0.5.0 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/token/ERC721/IERC721Receiver.sol#4)
+	- Version constraint ^0.8.24 is used by:
+		-^0.8.24 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/Bytes.sol#4)
+		-^0.8.24 (lib/openzeppelin-contracts-upgradeable/lib/openzeppelin-contracts/contracts/utils/Strings.sol#4)
+		-^0.8.24 (script/ConfigureArvoGovernance.s.sol#2)
+		-^0.8.24 (script/DeployArvoStaking.s.sol#2)
+		-^0.8.24 (script/FinalizeArvoGovernance.s.sol#2)
+		-^0.8.24 (script/StageArvoGovernance.s.sol#2)
+		-^0.8.24 (script/UpgradeArvoAcquisitionTestnet.s.sol#2)
+		-^0.8.24 (src/ArvoStakingBaseline.sol#2)
+		-^0.8.24 (src/ArvoVaultDefaultsBaseline.sol#2)
+		-^0.8.24 (src/mocks/MockArvoPriceOracle.sol#2)
+		-^0.8.24 (src/mocks/MockERC20.sol#2)
+		-^0.8.24 (src/mocks/MockFeeToken.sol#2)
+		-^0.8.24 (src/mocks/MockReentrantToken.sol#2)
+		-^0.8.24 (test/deployment/ArvoGovernanceTopology.t.sol#2)
+		-^0.8.24 (test/deployment/ArvoTimelockedUpgrade.t.sol#2)
+		-^0.8.24 (test/deployment/ConfigureArvoGovernance.t.sol#2)
+		-^0.8.24 (test/deployment/DeployArvoStaking.t.sol#2)
+		-^0.8.24 (test/deployment/FinalizeArvoGovernance.t.sol#2)
+		-^0.8.24 (test/deployment/StageArvoGovernance.t.sol#2)
+		-^0.8.24 (test/deployment/UpgradeArvoAcquisitionTestnet.t.sol#2)
+		-^0.8.24 (test/invariant/ArvoStakingHandler.sol#2)
+		-^0.8.24 (test/invariant/ArvoStakingInvariant.t.sol#2)
+		-^0.8.24 (test/security/ArvoEarlyClose.t.sol#2)
+		-^0.8.24 (test/security/ArvoStakingGovernance.t.sol#2)
+		-^0.8.24 (test/security/ArvoStakingHardening.t.sol#2)
+		-^0.8.24 (test/security/ArvoStakingReentrancy.t.sol#2)
+		-^0.8.24 (test/unit/ArvoAcquisition.t.sol#2)
+		-^0.8.24 (test/unit/ArvoCrossAsset.t.sol#2)
+		-^0.8.24 (test/unit/ArvoStakingCompound.t.sol#2)
+		-^0.8.24 (test/unit/ArvoStakingCustody.t.sol#2)
+		-^0.8.24 (test/unit/ArvoStakingEmergency.t.sol#2)
+		-^0.8.24 (test/unit/ArvoStakingPools.t.sol#2)
+		-^0.8.24 (test/unit/ArvoStakingRestake.t.sol#2)
+		-^0.8.24 (test/unit/ArvoStakingSettlement.t.sol#2)
+		-^0.8.24 (test/unit/ArvoVaultDefaults.t.sol#2)
+		-^0.8.24 (test/upgrade/ArvoAcquisitionUpgrade.t.sol#2)
+		-^0.8.24 (test/upgrade/ArvoStakingProxy.t.sol#2)
+		-^0.8.24 (test/upgrade/ArvoStakingUpgrade.t.sol#2)
+		-^0.8.24 (test/upgrade/ArvoStakingUpgradeValidation.t.sol#2)
+		-^0.8.24 (test/upgrade/fixtures/ArvoStakingAuditedV1.sol#2)
+		-^0.8.24 (test/upgrade/fixtures/ArvoStakingTestnetV1.sol#3)
+		-^0.8.24 (test/upgrade/mocks/ArvoStakingV2.sol#2)
+	- Version constraint ^0.8.13 is used by:
+		-^0.8.13 (lib/openzeppelin-foundry-upgrades/src/Defender.sol#2)
+		-^0.8.13 (lib/openzeppelin-foundry-upgrades/src/internal/Core.sol#2)
+		-^0.8.13 (lib/openzeppelin-foundry-upgrades/src/internal/DefenderDeploy.sol#2)
+	- Version constraint ^0.8.0 is used by:
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/Options.sol#2)
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/internal/StringFinder.sol#2)
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/internal/Utils.sol#2)
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/internal/Versions.sol#2)
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/internal/interfaces/IProxyAdmin.sol#2)
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/internal/interfaces/IUpgradeableBeacon.sol#2)
+		-^0.8.0 (lib/openzeppelin-foundry-upgrades/src/internal/interfaces/IUpgradeableProxy.sol#2)
+	- Version constraint 0.8.35 is used by:
+		-0.8.35 (script/UpgradeArvoAuditTestnet.s.sol#2)
+		-0.8.35 (src/ArvoAcquisitionEscrow.sol#2)
+		-0.8.35 (src/ArvoPoolCreation.sol#2)
+		-0.8.35 (src/ArvoStaking.sol#2)
+		-0.8.35 (src/ArvoStakingTypes.sol#2)
+		-0.8.35 (src/ArvoVaultDefaults.sol#2)
+		-0.8.35 (src/bonus/ArvoFirstEditionBonus.sol#2)
+		-0.8.35 (src/interfaces/IArvoPriceOracle.sol#2)
+		-0.8.35 (test/bonus/ArvoFirstEditionBonus.t.sol#2)
+		-0.8.35 (test/bonus/ArvoFirstEditionBonusInvariant.t.sol#2)
+		-0.8.35 (test/bonus/ArvoFirstEditionBonusReview.t.sol#2)
+		-0.8.35 (test/unit/ArvoAuditRemediation.t.sol#2)
+		-0.8.35 (test/upgrade/ArvoAuditUpgrade.t.sol#2)
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#different-pragma-directives-are-used
+INFO:Detectors:
+Detector: costly-loop
+ArvoFirstEditionBonus.claim(uint256) (src/bonus/ArvoFirstEditionBonus.sol#176-194) has costly operations inside a loop:
+	- totalClaimed += amount (src/bonus/ArvoFirstEditionBonus.sol#190)
+	Calls stack containing the loop:
+		ArvoFirstEditionBonus.claimMany(uint256[])
+Reference: https://github.com/crytic/slither/wiki/Detector-Documentation#costly-operations-inside-a-loop
+INFO:Slither:. analyzed (146 contracts with 102 detectors), 8 result(s) found

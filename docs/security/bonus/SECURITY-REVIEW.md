@@ -1,0 +1,66 @@
+# ArvoFirstEditionBonus — security review record
+
+Date: 18 November 2026
+Contract: `src/bonus/ArvoFirstEditionBonus.sol` (runtime size 5,467 bytes)
+Base: audited ArvoStaking `007754e6806aebc7e1aa88b09c31d2b6c2746443`, which this change leaves **unchanged**.
+
+**Status: NOT audited by Soken.** This record describes automated analysis, testing and an independent AI review. It is not a third-party audit. Describe the contract publicly as "independently tested with automated security analysis and AI review". Do not describe it as audited.
+
+## Design summary
+
+- A standalone contract. It **reads** the audited ArvoStaking proxy and never calls a state-changing staking function.
+- It has no owner, admin, pause or upgrade path. All parameters are immutable.
+- A fixed ARVO pot is shared pro rata by ARVO principal across one ARVO→ARVO pool's positions. The total is measured once, by a permissionless `snapshot()`, after entries close and before the earliest maturity.
+- Each position's bonus is claimable from its maturity and is paid to the position owner. Emergency-exited positions forfeit their share.
+- Unclaimed and forfeited ARVO returns to an immutable treasury after `claimDeadline`. Funding above the outstanding obligation is returnable at any time.
+
+## Trust assumptions
+
+1. ArvoStaking is a UUPS proxy. The holder of `UPGRADER_ROLE` (the timelock) could upgrade it to report false position data. The **maximum exposure is the bonus pot**; the contract cannot reach user principal.
+2. Someone must call `snapshot()` in the window from `closesAt` to `opensAt + duration`, which is at least 1 day and in practice about 51 days for a 9-day entry window. If it is missed, no bonus is payable and the whole pot returns to treasury.
+3. ARVO is a standard ERC-20 token, without fee-on-transfer or rebasing.
+
+## Testing
+
+| Suite | Result |
+| --- | --- |
+| Existing audited suite (unchanged) | 271 / 271 pass |
+| `test/bonus/ArvoFirstEditionBonus.t.sol`: unit tests, handover maths examples, edge cases, plus a 2,000-run fuzz conservation test | 24 / 24 pass |
+| `test/bonus/ArvoFirstEditionBonusInvariant.t.sol`: 4 invariants × 512 runs × 100 calls (stake, exit, snapshot, claim, principal claim, sweep, time jumps) | 4 / 4 pass |
+| `test/bonus/ArvoFirstEditionBonusReview.t.sol`: the independent reviewer's proofs of concept and regression tests | 6 / 6 pass |
+| **Total** | **305 / 305** (`forge clean && forge test`) |
+
+The invariants checked are:
+- The pot is never overpaid.
+- Every ARVO is accounted for.
+- The outstanding obligation is always backed by the contract's balance.
+- The snapshot equals the principal of the eligible positions.
+- Staking solvency is unaffected.
+
+## Static analysis
+
+- **Slither 0.11.6** (102 detectors): no high, medium or low results. The informational results are timestamp comparisons (by design: windows are measured in days), external calls in the `claimMany` loop (a non-claimable id reverts only that batch; single claims always work), a gas note, and the repo-wide mixed-pragma note. Output: `slither.txt`.
+- **Semgrep** with the Decurity smart-contract rules (57 rules): no security findings, only 5 gas-style suggestions, intentionally not applied for readability. Output: `semgrep.txt`.
+- **Aderyn** was not run: its release binaries were unavailable from the build environment.
+
+## Independent AI review (separate reviewer that did not write the code)
+
+No critical, high or medium findings. Overpayment was attempted through restake and compound into and out of the pool, same-block exits around the snapshot, protocol allocations, donations, timing edges and pool admin controls. None succeeded.
+
+| ID | Severity | Finding | Resolution |
+| --- | --- | --- | --- |
+| L-1 | Low | The snapshot window could be one second long | Fixed: the constructor requires `MIN_SNAPSHOT_WINDOW = 1 days` |
+| L-2 | Low | Dual or cross-asset positions in the same pool would share the ARVO pot | Fixed: the constructor requires an ARVO-stake, ARVO-reward-only vault |
+| I-1 | Info | The pool could be converted to an acquisition pool after deployment | Fixed: `snapshot()` reverts for acquisition pools. The test shows ARVO-only pools cannot be converted anyway |
+| I-2 | Info | Depends on the staking proxy's upgrade governance | Documented trust assumption |
+| I-3 | Info | `bonusFor` could show an unpayable estimate | Fixed: returns 0 after a missed snapshot window or after the deadline |
+| I-4 | Info | Forfeited shares stay locked until the deadline | Intended; returned to treasury after `claimDeadline` |
+| — | Cleanup | `uint64` casts were unchecked | Fixed: the deadline is bounds-checked |
+
+## Deployment checklist
+
+1. Create the First Edition pool on the staking contract (ARVO→ARVO only, `closesAt` set, entry window under `duration − 1 day`).
+2. Deploy `ArvoFirstEditionBonus(stakingProxy, poolId, bonusPot, treasurySafe, claimGracePeriod)` **before `opensAt`**. The constructor reverts otherwise.
+3. Transfer `bonusPot` ARVO to the bonus contract and verify its source on the block explorer.
+4. Set `NEXT_PUBLIC_FIRST_EDITION_BONUS_ADDRESS` in the app.
+5. Schedule a `snapshot()` call at `closesAt`. It is permissionless, so any wallet can make it.
