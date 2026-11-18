@@ -36,6 +36,11 @@ interface IArvoStakingBonusView {
 ///         `claim()`; payment always goes to the position owner.
 ///         bonus = bonusPot * position.arvoPrincipal / totalEligible.
 ///      4. Positions that used emergency exit forfeit their bonus.
+///
+///      Trust assumption: ArvoStaking is an upgradeable proxy. Whoever controls
+///      its UPGRADER_ROLE (the timelock) could deploy logic that reports false
+///      position data. The bonus pot is the maximum exposure; user principal
+///      in ArvoStaking is never reachable from this contract.
 ///      5. After `claimDeadline`, anyone may send the remaining balance to the
 ///         immutable `treasury`. Funding above the outstanding obligation can be
 ///         sent to `treasury` at any time.
@@ -59,6 +64,9 @@ contract ArvoFirstEditionBonus is ReentrancyGuard {
     uint64 public immutable earliestMaturity;
     /// @notice After this time unclaimed bonus can be returned to treasury.
     uint64 public immutable claimDeadline;
+    /// @notice Minimum time between entry close and the earliest maturity,
+    ///         leaving a practical window to call `snapshot()`.
+    uint256 public constant MIN_SNAPSHOT_WINDOW = 1 days;
 
     bool public snapshotTaken;
     uint64 public snapshotAt;
@@ -106,7 +114,13 @@ contract ArvoFirstEditionBonus is ReentrancyGuard {
         if (p.closesAt == 0 || p.finalized || block.timestamp >= p.opensAt) {
             revert InvalidConfiguration();
         }
-        if (v.duration == 0 || uint256(p.closesAt) >= uint256(p.opensAt) + v.duration) {
+        if (v.duration == 0 || uint256(p.closesAt) + MIN_SNAPSHOT_WINDOW > uint256(p.opensAt) + v.duration) {
+            revert InvalidConfiguration();
+        }
+        // ARVO deposit, ARVO reward only: no USDC, dual or cross-asset products,
+        // so every eligible position's share is measured in ARVO principal.
+        if (!v.arvoStakeEnabled || !v.arvoRewardEnabled || v.usdcStakeEnabled
+            || v.dualStakeEnabled || v.usdcRewardEnabled || v.mixedRewardEnabled) {
             revert InvalidConfiguration();
         }
         if (claimGracePeriod < 30 days || claimGracePeriod > 730 days) {
@@ -119,9 +133,11 @@ contract ArvoFirstEditionBonus is ReentrancyGuard {
         bonusPot = bonusPot_;
         treasury = treasury_;
         closesAt = p.closesAt;
+        uint256 deadline = uint256(p.closesAt) + v.duration + claimGracePeriod;
+        if (deadline > type(uint64).max) revert InvalidConfiguration();
         earliestMaturity = uint64(uint256(p.opensAt) + v.duration);
         // Latest possible maturity is just before closesAt + duration.
-        claimDeadline = uint64(uint256(p.closesAt) + v.duration + claimGracePeriod);
+        claimDeadline = uint64(deadline);
     }
 
     /// @notice Records the pool's eligible ARVO principal. Callable by anyone,
@@ -131,6 +147,8 @@ contract ArvoFirstEditionBonus is ReentrancyGuard {
         if (block.timestamp < closesAt) revert SnapshotTooEarly();
         if (block.timestamp >= earliestMaturity) revert SnapshotWindowMissed();
         if (arvo.balanceOf(address(this)) < bonusPot) revert PotNotFunded();
+        // Configuration can still change before opening; re-check at snapshot.
+        if (staking.acquisitionPools(poolId)) revert InvalidConfiguration();
 
         uint256 total = staking.vaultArvoPrincipal(poolId);
         snapshotTaken = true;
@@ -144,7 +162,8 @@ contract ArvoFirstEditionBonus is ReentrancyGuard {
     ///         estimate using current pool principal and can fall as more ARVO
     ///         enters. Returns zero for ineligible or already claimed positions.
     function bonusFor(uint256 positionId) public view returns (uint256) {
-        if (claimed[positionId]) return 0;
+        if (claimed[positionId] || block.timestamp >= claimDeadline) return 0;
+        if (!snapshotTaken && block.timestamp >= earliestMaturity) return 0;
         T.Position memory p = staking.position(positionId);
         if (p.owner == address(0) || p.vaultId != poolId || p.emergencyExit) return 0;
         if (p.openedAt >= closesAt) return 0;
