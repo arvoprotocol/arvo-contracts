@@ -1,7 +1,7 @@
-# ArvoFirstEditionBonus — security review record
+# ArvoSharedBonus — security review record
 
 Date: 18 November 2026
-Contract: `src/bonus/ArvoFirstEditionBonus.sol` (runtime size 5,467 bytes)
+Contract: `src/bonus/ArvoSharedBonus.sol` (runtime size 5,467 bytes)
 Base: audited ArvoStaking `007754e6806aebc7e1aa88b09c31d2b6c2746443`, which this change leaves **unchanged**.
 
 **Status: NOT audited by Soken.** This record describes automated analysis, testing and an independent AI review. It is not a third-party audit. Describe the contract publicly as "independently tested with automated security analysis and AI review". Do not describe it as audited.
@@ -25,9 +25,9 @@ Base: audited ArvoStaking `007754e6806aebc7e1aa88b09c31d2b6c2746443`, which this
 | Suite | Result |
 | --- | --- |
 | Existing audited suite (unchanged) | 271 / 271 pass |
-| `test/bonus/ArvoFirstEditionBonus.t.sol`: unit tests, handover maths examples, edge cases, plus a 2,000-run fuzz conservation test | 24 / 24 pass |
-| `test/bonus/ArvoFirstEditionBonusInvariant.t.sol`: 4 invariants × 512 runs × 100 calls (stake, exit, snapshot, claim, principal claim, sweep, time jumps) | 4 / 4 pass |
-| `test/bonus/ArvoFirstEditionBonusReview.t.sol`: the independent reviewer's proofs of concept and regression tests | 6 / 6 pass |
+| `test/bonus/ArvoSharedBonus.t.sol`: unit tests, handover maths examples, edge cases, plus a 2,000-run fuzz conservation test | 24 / 24 pass |
+| `test/bonus/ArvoSharedBonusInvariant.t.sol`: 4 invariants × 512 runs × 100 calls (stake, exit, snapshot, claim, principal claim, sweep, time jumps) | 4 / 4 pass |
+| `test/bonus/ArvoSharedBonusReview.t.sol`: the independent reviewer's proofs of concept and regression tests | 6 / 6 pass |
 | **Total** | **305 / 305** (`forge clean && forge test`) |
 
 The invariants checked are:
@@ -60,7 +60,11 @@ No critical, high or medium findings. Overpayment was attempted through restake 
 ## Deployment checklist
 
 1. Create the First Edition pool on the staking contract (ARVO→ARVO only, `closesAt` set, entry window under `duration − 1 day`).
-2. Deploy `ArvoFirstEditionBonus(stakingProxy, poolId, bonusPot, treasurySafe, claimGracePeriod)` **before `opensAt`**. The constructor reverts otherwise.
+2. Deploy `ArvoSharedBonus(stakingProxy, poolId, bonusPot, treasurySafe, claimGracePeriod)` **before `opensAt`**. The constructor reverts otherwise.
 3. Transfer `bonusPot` ARVO to the bonus contract and verify its source on the block explorer.
 4. Set `NEXT_PUBLIC_FIRST_EDITION_BONUS_ADDRESS` in the app.
 5. Schedule a `snapshot()` call at `closesAt`. It is permissionless, so any wallet can make it.
+
+## Rename (18 Nov 2026)
+
+The contract was renamed from `ArvoFirstEditionBonus` to `ArvoSharedBonus` (and the deploy script to `DeploySharedBonus.s.sol`) because one bonus contract can be deployed for any ARVO->ARVO vault, not only First Edition. No logic changed: the full suite (308 tests, including the reviewer's proof-of-concept regression tests and the invariant tests) passes unchanged, and Slither and Semgrep were re-run with the same results.

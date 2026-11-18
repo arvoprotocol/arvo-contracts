@@ -3,8 +3,8 @@
 ┌─────────────────┐
 │ 6 Code Findings │
 └─────────────────┘
-                                       
-    src/bonus/ArvoFirstEditionBonus.sol
+                                 
+    src/bonus/ArvoSharedBonus.sol
      ❱ home.claude.tools.semgrep-smart-contracts.solidity.performance.non-payable-constructor
           ❰❰ Blocking ❱❱
           Consider making costructor payable to save gas.

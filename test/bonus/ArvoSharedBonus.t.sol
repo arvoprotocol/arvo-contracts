@@ -7,7 +7,7 @@ import { ERC1967Proxy } from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy
 import { ArvoStaking } from "../../src/ArvoStaking.sol";
 import { ArvoStakingTypes as T } from "../../src/ArvoStakingTypes.sol";
 import { MockERC20 } from "../../src/mocks/MockERC20.sol";
-import { ArvoFirstEditionBonus, IArvoStakingBonusView } from "../../src/bonus/ArvoFirstEditionBonus.sol";
+import { ArvoSharedBonus, IArvoStakingBonusView } from "../../src/bonus/ArvoSharedBonus.sol";
 
 /// @dev Shared fixture: the audited ArvoStaking behind a real ERC1967 proxy,
 ///      configured as the First Edition working example from the handover:
@@ -16,7 +16,7 @@ abstract contract BonusFixture is Test {
     ArvoStaking internal staking;
     MockERC20 internal arvo;
     MockERC20 internal usdc;
-    ArvoFirstEditionBonus internal bonus;
+    ArvoSharedBonus internal bonus;
 
     address internal admin = address(0xA11CE);
     address internal treasury = address(0x7EA5);
@@ -58,7 +58,7 @@ abstract contract BonusFixture is Test {
         staking.reservePoolRewardBudget(poolId, BASE_BUDGET, 0);
         vm.stopPrank();
 
-        bonus = new ArvoFirstEditionBonus(
+        bonus = new ArvoSharedBonus(
             IArvoStakingBonusView(address(staking)), poolId, POT, treasury, GRACE
         );
         arvo.mint(address(bonus), POT);
@@ -90,7 +90,7 @@ abstract contract BonusFixture is Test {
     }
 }
 
-contract ArvoFirstEditionBonusTest is BonusFixture {
+contract ArvoSharedBonusTest is BonusFixture {
     // ---------------------------------------------------------------- config
 
     function testImmutablesMatchPool() public view {
@@ -104,15 +104,15 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
 
     function testConstructorRejectsOpenPool() public {
         vm.warp(opensAt);
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(IArvoStakingBonusView(address(staking)), poolId, POT, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(IArvoStakingBonusView(address(staking)), poolId, POT, treasury, GRACE);
     }
 
     function testConstructorRejectsPoolWithoutClose() public {
         vm.prank(admin);
         uint32 open = staking.createProductPool(T.VaultKind.CUSTOM, _config(), opensAt, 0, CAP, 0, 1, 0);
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(IArvoStakingBonusView(address(staking)), open, POT, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(IArvoStakingBonusView(address(staking)), open, POT, treasury, GRACE);
     }
 
     function testConstructorRejectsWindowLongerThanTerm() public {
@@ -120,22 +120,22 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         uint32 longWindow = staking.createProductPool(
             T.VaultKind.CUSTOM, _config(), opensAt, opensAt + DURATION, CAP, 0, 1, 0
         );
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(IArvoStakingBonusView(address(staking)), longWindow, POT, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(IArvoStakingBonusView(address(staking)), longWindow, POT, treasury, GRACE);
     }
 
     function testConstructorRejectsBadParameters() public {
         IArvoStakingBonusView s = IArvoStakingBonusView(address(staking));
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(s, poolId, 0, treasury, GRACE);
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(s, poolId, POT, address(0), GRACE);
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(s, poolId, POT, treasury, 29 days);
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(s, poolId, POT, treasury, 731 days);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(s, poolId, 0, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(s, poolId, POT, address(0), GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(s, poolId, POT, treasury, 29 days);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(s, poolId, POT, treasury, 731 days);
         vm.expectRevert();
-        new ArvoFirstEditionBonus(s, 99, POT, treasury, GRACE);
+        new ArvoSharedBonus(s, 99, POT, treasury, GRACE);
     }
 
     // ------------------------------------------------------------- handover maths
@@ -201,22 +201,22 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         vm.warp(opensAt);
         _stake(alice, MIN);
         vm.warp(closesAt - 1);
-        vm.expectRevert(ArvoFirstEditionBonus.SnapshotTooEarly.selector);
+        vm.expectRevert(ArvoSharedBonus.SnapshotTooEarly.selector);
         bonus.snapshot();
         vm.warp(opensAt + DURATION);
-        vm.expectRevert(ArvoFirstEditionBonus.SnapshotWindowMissed.selector);
+        vm.expectRevert(ArvoSharedBonus.SnapshotWindowMissed.selector);
         bonus.snapshot();
     }
 
     function testSnapshotOnceAndRequiresFunding() public {
-        ArvoFirstEditionBonus unfunded = new ArvoFirstEditionBonus(
+        ArvoSharedBonus unfunded = new ArvoSharedBonus(
             IArvoStakingBonusView(address(staking)), poolId, POT, treasury, GRACE
         );
         vm.warp(closesAt);
-        vm.expectRevert(ArvoFirstEditionBonus.PotNotFunded.selector);
+        vm.expectRevert(ArvoSharedBonus.PotNotFunded.selector);
         unfunded.snapshot();
         bonus.snapshot();
-        vm.expectRevert(ArvoFirstEditionBonus.SnapshotAlreadyTaken.selector);
+        vm.expectRevert(ArvoSharedBonus.SnapshotAlreadyTaken.selector);
         bonus.snapshot();
     }
 
@@ -234,17 +234,17 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
     function testClaimGuards() public {
         vm.warp(opensAt);
         uint256 a = _stake(alice, MIN);
-        vm.expectRevert(ArvoFirstEditionBonus.SnapshotMissing.selector);
+        vm.expectRevert(ArvoSharedBonus.SnapshotMissing.selector);
         bonus.claim(a);
         vm.warp(closesAt);
         bonus.snapshot();
-        vm.expectRevert(ArvoFirstEditionBonus.NotMatured.selector);
+        vm.expectRevert(ArvoSharedBonus.NotMatured.selector);
         bonus.claim(a);
-        vm.expectRevert(ArvoFirstEditionBonus.WrongPool.selector);
+        vm.expectRevert(ArvoSharedBonus.WrongPool.selector);
         bonus.claim(999);
         vm.warp(opensAt + DURATION);
         bonus.claim(a);
-        vm.expectRevert(ArvoFirstEditionBonus.AlreadyClaimed.selector);
+        vm.expectRevert(ArvoSharedBonus.AlreadyClaimed.selector);
         bonus.claim(a);
     }
 
@@ -292,7 +292,7 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         bonus.snapshot();
         assertEq(bonus.totalEligible(), MIN); // other pool's stake not counted
         vm.warp(opensAt + DURATION);
-        vm.expectRevert(ArvoFirstEditionBonus.WrongPool.selector);
+        vm.expectRevert(ArvoSharedBonus.WrongPool.selector);
         bonus.claim(foreign);
         assertEq(bonus.claim(a), POT);
     }
@@ -324,7 +324,7 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         assertEq(bonus.totalEligible(), 10_000_000 ether);
         vm.warp(opensAt + DURATION);
         assertEq(bonus.claim(a), POT);
-        vm.expectRevert(ArvoFirstEditionBonus.EmergencyExited.selector);
+        vm.expectRevert(ArvoSharedBonus.EmergencyExited.selector);
         bonus.claim(b);
     }
 
@@ -337,10 +337,10 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         _emergencyExit(bob, b);
         vm.warp(opensAt + DURATION);
         assertEq(bonus.claim(a), POT / 2);
-        vm.expectRevert(ArvoFirstEditionBonus.EmergencyExited.selector);
+        vm.expectRevert(ArvoSharedBonus.EmergencyExited.selector);
         bonus.claim(b);
 
-        vm.expectRevert(ArvoFirstEditionBonus.NothingToReturn.selector);
+        vm.expectRevert(ArvoSharedBonus.NothingToReturn.selector);
         bonus.returnToTreasury();
         vm.warp(bonus.claimDeadline());
         assertEq(bonus.returnToTreasury(), POT / 2);
@@ -352,7 +352,7 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
     function testOverfundingReturnableButObligationProtected() public {
         arvo.mint(address(bonus), 7 ether);
         assertEq(bonus.returnToTreasury(), 7 ether);
-        vm.expectRevert(ArvoFirstEditionBonus.NothingToReturn.selector);
+        vm.expectRevert(ArvoSharedBonus.NothingToReturn.selector);
         bonus.returnToTreasury();
         assertEq(arvo.balanceOf(address(bonus)), POT);
     }
@@ -376,7 +376,7 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         vm.warp(closesAt);
         bonus.snapshot();
         vm.warp(bonus.claimDeadline());
-        vm.expectRevert(ArvoFirstEditionBonus.ClaimWindowClosed.selector);
+        vm.expectRevert(ArvoSharedBonus.ClaimWindowClosed.selector);
         bonus.claim(a);
         assertEq(bonus.returnToTreasury(), POT);
     }
@@ -416,7 +416,7 @@ contract ArvoFirstEditionBonusTest is BonusFixture {
         uint256 eligibleAtClaim;
         for (uint256 i; i < count; ++i) {
             if (staking.position(ids[i]).emergencyExit) {
-                vm.expectRevert(ArvoFirstEditionBonus.EmergencyExited.selector);
+                vm.expectRevert(ArvoSharedBonus.EmergencyExited.selector);
                 bonus.claim(ids[i]);
             } else {
                 uint256 expected = (POT * staking.position(ids[i]).arvoPrincipal) / bonus.totalEligible();

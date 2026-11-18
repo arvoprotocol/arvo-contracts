@@ -18,7 +18,7 @@ interface IArvoStakingBonusView {
     function position(uint256 positionId) external view returns (T.Position memory);
 }
 
-/// @title ArvoFirstEditionBonus
+/// @title ArvoSharedBonus
 /// @notice Fixed ARVO bonus pot shared pro rata across one staking pool's
 ///         ARVO principal, measured once after the pool's entry window closes.
 ///
@@ -51,7 +51,7 @@ interface IArvoStakingBonusView {
 ///      `closesAt`, and pool times are immutable in ArvoStaking. Every unsettled
 ///      position was therefore opened in this pool and is counted exactly once,
 ///      so the sum of all floor-rounded bonuses can never exceed `bonusPot`.
-contract ArvoFirstEditionBonus is ReentrancyGuard {
+contract ArvoSharedBonus is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     IArvoStakingBonusView public immutable staking;

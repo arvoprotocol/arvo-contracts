@@ -3,19 +3,19 @@ pragma solidity 0.8.35;
 
 import { Script, console2 } from "forge-std/Script.sol";
 import { ArvoStakingTypes as T } from "../src/ArvoStakingTypes.sol";
-import { ArvoFirstEditionBonus, IArvoStakingBonusView } from "../src/bonus/ArvoFirstEditionBonus.sol";
+import { ArvoSharedBonus, IArvoStakingBonusView } from "../src/bonus/ArvoSharedBonus.sol";
 
-/// @notice Deploys the First Edition shared bonus for an existing, not-yet-open
-///         ARVO->ARVO pool. Run with --dry-run first and review the printed
+/// @notice Deploys a shared bonus for any existing, not-yet-open ARVO->ARVO
+///         pool (one bonus contract per vault). Run with --dry-run first and review the printed
 ///         terms. Funding the pot is a separate transfer from the Treasury Safe.
 ///
 /// Required env: STAKING_PROXY, BONUS_POOL_ID, BONUS_POT_ARVO (whole ARVO),
 ///               BONUS_TREASURY (Safe), BONUS_GRACE_DAYS, EXPECTED_CHAIN_ID.
-contract DeployFirstEditionBonus is Script {
+contract DeploySharedBonus is Script {
     error WrongChain();
     error TreasuryNotContract();
 
-    function run() external returns (ArvoFirstEditionBonus bonus) {
+    function run() external returns (ArvoSharedBonus bonus) {
         if (block.chainid != vm.envUint("EXPECTED_CHAIN_ID")) revert WrongChain();
         IArvoStakingBonusView staking = IArvoStakingBonusView(vm.envAddress("STAKING_PROXY"));
         uint32 poolId = uint32(vm.envUint("BONUS_POOL_ID"));
@@ -42,10 +42,10 @@ contract DeployFirstEditionBonus is Script {
         console2.log("Claim grace days", grace / 1 days);
 
         vm.startBroadcast();
-        bonus = new ArvoFirstEditionBonus(staking, poolId, pot, treasury, grace);
+        bonus = new ArvoSharedBonus(staking, poolId, pot, treasury, grace);
         vm.stopBroadcast();
 
-        console2.log("ArvoFirstEditionBonus", address(bonus));
+        console2.log("ArvoSharedBonus", address(bonus));
         console2.log("Claim deadline (unix)", bonus.claimDeadline());
         console2.log("NEXT STEP: Treasury Safe transfers exactly the pot to this address before opensAt.");
     }

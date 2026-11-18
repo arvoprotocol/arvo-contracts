@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.35;
 
-import { BonusFixture } from "./ArvoFirstEditionBonus.t.sol";
+import { BonusFixture } from "./ArvoSharedBonus.t.sol";
 import { ArvoStakingTypes as T } from "../../src/ArvoStakingTypes.sol";
 import { ArvoAcquisitionEscrow } from "../../src/ArvoAcquisitionEscrow.sol";
 import { MockERC20 } from "../../src/mocks/MockERC20.sol";
-import { ArvoFirstEditionBonus, IArvoStakingBonusView } from "../../src/bonus/ArvoFirstEditionBonus.sol";
+import { ArvoSharedBonus, IArvoStakingBonusView } from "../../src/bonus/ArvoSharedBonus.sol";
 
-contract ArvoFirstEditionBonusReviewTest is BonusFixture {
+contract ArvoSharedBonusReviewTest is BonusFixture {
     function _cfg(uint32 d) internal pure returns (T.VaultConfig memory c) {
         c = _config(); c.duration = d;
     }
@@ -55,8 +55,8 @@ contract ArvoFirstEditionBonusReviewTest is BonusFixture {
 
         // Old pool-A positions must not be claimable from the bonus
         vm.warp(closesAt + DURATION);
-        vm.expectRevert(ArvoFirstEditionBonus.WrongPool.selector); bonus.claim(ra);
-        vm.expectRevert(ArvoFirstEditionBonus.WrongPool.selector); bonus.claim(rb);
+        vm.expectRevert(ArvoSharedBonus.WrongPool.selector); bonus.claim(ra);
+        vm.expectRevert(ArvoSharedBonus.WrongPool.selector); bonus.claim(rb);
 
         // carol claims principal first, alice compounds OUT into a new pool
         vm.prank(carol); staking.claim(c1);
@@ -64,14 +64,14 @@ contract ArvoFirstEditionBonusReviewTest is BonusFixture {
         uint32 p2 = _shortPool(o2, o2 + 1 days);
         vm.warp(o2);
         vm.prank(alice); uint256 aliceOut = staking.compound(aliceNew, p2, T.RewardMode.ARVO);
-        vm.expectRevert(ArvoFirstEditionBonus.WrongPool.selector); bonus.claim(aliceOut);
+        vm.expectRevert(ArvoSharedBonus.WrongPool.selector); bonus.claim(aliceOut);
 
         uint256 paid;
         paid += bonus.claim(aliceNew);
         paid += bonus.claim(bobNew);
         paid += bonus.claim(c1);
-        vm.expectRevert(ArvoFirstEditionBonus.EmergencyExited.selector); bonus.claim(d1);
-        vm.expectRevert(ArvoFirstEditionBonus.EmergencyExited.selector); bonus.claim(e1);
+        vm.expectRevert(ArvoSharedBonus.EmergencyExited.selector); bonus.claim(d1);
+        vm.expectRevert(ArvoSharedBonus.EmergencyExited.selector); bonus.claim(e1);
         assertLe(paid, POT);
         assertEq(paid, bonus.totalClaimed());
         // eve's forfeited share remains locked until deadline, then to treasury
@@ -95,11 +95,11 @@ contract ArvoFirstEditionBonusReviewTest is BonusFixture {
         _stake(alice, 1_000_000 ether);
         arvo.mint(address(bonus), 123 ether);
         assertEq(bonus.returnToTreasury(), 123 ether);
-        vm.expectRevert(ArvoFirstEditionBonus.NothingToReturn.selector);
+        vm.expectRevert(ArvoSharedBonus.NothingToReturn.selector);
         bonus.returnToTreasury();
         vm.warp(closesAt);
         bonus.snapshot();
-        vm.expectRevert(ArvoFirstEditionBonus.NothingToReturn.selector);
+        vm.expectRevert(ArvoSharedBonus.NothingToReturn.selector);
         bonus.returnToTreasury();
     }
     /// Review L-2: pools with dual or cross-asset products are rejected.
@@ -111,10 +111,10 @@ contract ArvoFirstEditionBonusReviewTest is BonusFixture {
         uint32 cross = staking.createProductPool(T.VaultKind.CUSTOM, c, opensAt, closesAt, CAP, 0, 1 | 2, MIN);
         vm.stopPrank();
         IArvoStakingBonusView s_ = IArvoStakingBonusView(address(staking));
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(s_, dual, POT, treasury, GRACE);
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(s_, cross, POT, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(s_, dual, POT, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(s_, cross, POT, treasury, GRACE);
     }
 
     /// Review L-1: the snapshot window must be at least one day.
@@ -123,9 +123,9 @@ contract ArvoFirstEditionBonusReviewTest is BonusFixture {
         uint32 tight = staking.createProductPool(T.VaultKind.CUSTOM, _config(), opensAt, opensAt + DURATION - 1 days + 1, CAP, 0, 1, 0);
         uint32 exact = staking.createProductPool(T.VaultKind.CUSTOM, _config(), opensAt, opensAt + DURATION - 1 days, CAP, 0, 1, 0);
         vm.stopPrank();
-        vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
-        new ArvoFirstEditionBonus(IArvoStakingBonusView(address(staking)), tight, POT, treasury, GRACE);
-        new ArvoFirstEditionBonus(IArvoStakingBonusView(address(staking)), exact, POT, treasury, GRACE);
+        vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
+        new ArvoSharedBonus(IArvoStakingBonusView(address(staking)), tight, POT, treasury, GRACE);
+        new ArvoSharedBonus(IArvoStakingBonusView(address(staking)), exact, POT, treasury, GRACE);
     }
 
     /// Review I-1: converting the pool to an acquisition pool after deployment
@@ -138,7 +138,7 @@ contract ArvoFirstEditionBonusReviewTest is BonusFixture {
         try staking.configureAcquisitionPool(poolId, address(tre)) {
             vm.stopPrank();
             vm.warp(closesAt);
-            vm.expectRevert(ArvoFirstEditionBonus.InvalidConfiguration.selector);
+            vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
             bonus.snapshot();
         } catch {
             vm.stopPrank();

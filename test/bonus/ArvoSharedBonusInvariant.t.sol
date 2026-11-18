@@ -5,13 +5,13 @@ import { Test } from "forge-std/Test.sol";
 import { ArvoStaking } from "../../src/ArvoStaking.sol";
 import { ArvoStakingTypes as T } from "../../src/ArvoStakingTypes.sol";
 import { MockERC20 } from "../../src/mocks/MockERC20.sol";
-import { ArvoFirstEditionBonus } from "../../src/bonus/ArvoFirstEditionBonus.sol";
-import { BonusFixture } from "./ArvoFirstEditionBonus.t.sol";
+import { ArvoSharedBonus } from "../../src/bonus/ArvoSharedBonus.sol";
+import { BonusFixture } from "./ArvoSharedBonus.t.sol";
 
 contract BonusHandler is Test {
     ArvoStaking internal staking;
     MockERC20 internal arvo;
-    ArvoFirstEditionBonus internal bonus;
+    ArvoSharedBonus internal bonus;
     address internal admin;
     uint32 internal poolId;
 
@@ -20,7 +20,7 @@ contract BonusHandler is Test {
     uint256 public claimedSum;
     mapping(uint256 => bool) public exitedBeforeSnapshot;
 
-    constructor(ArvoStaking s, MockERC20 a, ArvoFirstEditionBonus b, address adm, uint32 p) {
+    constructor(ArvoStaking s, MockERC20 a, ArvoSharedBonus b, address adm, uint32 p) {
         staking = s; arvo = a; bonus = b; admin = adm; poolId = p;
     }
 
@@ -72,7 +72,7 @@ contract BonusHandler is Test {
     }
 }
 
-contract ArvoFirstEditionBonusInvariantTest is BonusFixture {
+contract ArvoSharedBonusInvariantTest is BonusFixture {
     BonusHandler internal handler;
 
     function setUp() public override {
