@@ -59,12 +59,22 @@ No critical, high or medium findings. Overpayment was attempted through restake 
 
 ## Deployment checklist
 
-1. Create the First Edition pool on the staking contract (ARVO→ARVO only, `closesAt` set, entry window under `duration − 1 day`).
+1. Create the pool on the staking contract (ARVO deposits only: ARVO→ARVO, ARVO→USDC or both; `closesAt` set, entry window under `duration − 1 day`).
 2. Deploy `ArvoSharedBonus(stakingProxy, poolId, bonusPot, treasurySafe, claimGracePeriod)` **before `opensAt`**. The constructor reverts otherwise.
 3. Transfer `bonusPot` ARVO to the bonus contract and verify its source on the block explorer.
-4. Set `NEXT_PUBLIC_FIRST_EDITION_BONUS_ADDRESS` in the app.
+4. Add the bonus address to `NEXT_PUBLIC_BONUS_ADDRESSES` in the app.
 5. Schedule a `snapshot()` call at `closesAt`. It is permissionless, so any wallet can make it.
 
 ## Rename (18 Nov 2026)
 
 The contract was renamed from `ArvoFirstEditionBonus` to `ArvoSharedBonus` (and the deploy script to `DeploySharedBonus.s.sol`) because one bonus contract can be deployed for any ARVO->ARVO vault, not only First Edition. No logic changed: the full suite (308 tests, including the reviewer's proof-of-concept regression tests and the invariant tests) passes unchanged, and Slither and Semgrep were re-run with the same results.
+
+## Scope change: ARVO->USDC pools (20 Nov 2026)
+
+**What changed.** The constructor previously accepted only pools that take ARVO and pay an ARVO base reward (review finding L-2 excluded dual and cross-asset pools as a precaution). It now also accepts pools that take ARVO deposits and pay a USDC base reward (`products` 2, or 1|2). The bonus pot is still paid in ARVO and shared by ARVO principal. Dual deposits, USDC deposits, mixed rewards and acquisition pools remain rejected.
+
+**Why it is safe.** `ArvoStaking._stake` adds exactly the deposited ARVO to `vaultArvoPrincipal[vaultId]` and records it as `position.arvoPrincipal`, whatever the reward mode. Claims, emergency exits, restakes and compounds subtract or add that same principal. So the snapshot invariant in the contract header (the snapshot equals the sum of eligible ARVO principal; payouts can never exceed `bonusPot`) holds for ARVO->USDC positions exactly as for ARVO->ARVO ones. No other logic changed.
+
+**Tests.** `testRejectsDualAndCrossAssetPools` was replaced by `testRejectsDualAndUsdcDepositPools` (dual and USDC-deposit pools still revert). Added `testArvoForUsdcPoolSharesPotByArvoPrincipal` (pro-rata ARVO payout in an ARVO->USDC pool; base USDC reward and principal unaffected) and `testMixedArvoProductsShareOnePot` (ARVO->ARVO and ARVO->USDC positions share one pot; emergency exit forfeits). 39 bonus tests and 310 tests in the full suite pass. Slither was re-run with no new findings.
+
+**Review status.** This change was made after the independent review above and has not been separately reviewed. It needs your approval before any deployment.
