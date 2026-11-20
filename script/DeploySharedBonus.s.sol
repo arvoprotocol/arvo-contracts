@@ -5,8 +5,9 @@ import { Script, console2 } from "forge-std/Script.sol";
 import { ArvoStakingTypes as T } from "../src/ArvoStakingTypes.sol";
 import { ArvoSharedBonus, IArvoStakingBonusView } from "../src/bonus/ArvoSharedBonus.sol";
 
-/// @notice Deploys a shared bonus for any existing, not-yet-open ARVO->ARVO
-///         pool (one bonus contract per vault). Run with --dry-run first and review the printed
+/// @notice Deploys a shared bonus for any existing, not-yet-open pool that takes ARVO deposits
+///         (ARVO->ARVO, ARVO->USDC, or both). The pot is paid in ARVO.
+///         One bonus contract per vault. Run with --dry-run first and review the printed
 ///         terms. Funding the pot is a separate transfer from the Treasury Safe.
 ///
 /// Required env: STAKING_PROXY, BONUS_POOL_ID, BONUS_POT_ARVO (whole ARVO),
