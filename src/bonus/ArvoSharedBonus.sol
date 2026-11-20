@@ -21,6 +21,8 @@ interface IArvoStakingBonusView {
 /// @title ArvoSharedBonus
 /// @notice Fixed ARVO bonus pot shared pro rata across one staking pool's
 ///         ARVO principal, measured once after the pool's entry window closes.
+///         Works for pools that take ARVO deposits only, whether the base
+///         reward is paid in ARVO, in USDC, or either.
 ///
 /// @dev Standalone companion to the audited ArvoStaking contract. It only reads
 ///      staking state and never calls a state-changing staking function, so it
@@ -117,10 +119,13 @@ contract ArvoSharedBonus is ReentrancyGuard {
         if (v.duration == 0 || uint256(p.closesAt) + MIN_SNAPSHOT_WINDOW > uint256(p.opensAt) + v.duration) {
             revert InvalidConfiguration();
         }
-        // ARVO deposit, ARVO reward only: no USDC, dual or cross-asset products,
-        // so every eligible position's share is measured in ARVO principal.
-        if (!v.arvoStakeEnabled || !v.arvoRewardEnabled || v.usdcStakeEnabled
-            || v.dualStakeEnabled || v.usdcRewardEnabled || v.mixedRewardEnabled) {
+        // ARVO deposits only, so every eligible position's share is measured in
+        // ARVO principal. The base reward may be ARVO (ARVO->ARVO), USDC paid on
+        // ARVO principal (ARVO->USDC), or both products in one pool: in each case
+        // ArvoStaking adds exactly the deposited ARVO to vaultArvoPrincipal.
+        // USDC deposits, dual deposits and mixed rewards stay excluded.
+        if (!v.arvoStakeEnabled || v.usdcStakeEnabled || v.dualStakeEnabled || v.mixedRewardEnabled
+            || (!v.arvoRewardEnabled && !v.usdcRewardEnabled)) {
             revert InvalidConfiguration();
         }
         if (claimGracePeriod < 30 days || claimGracePeriod > 730 days) {

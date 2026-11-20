@@ -5,6 +5,7 @@ import { BonusFixture } from "./ArvoSharedBonus.t.sol";
 import { ArvoStakingTypes as T } from "../../src/ArvoStakingTypes.sol";
 import { ArvoAcquisitionEscrow } from "../../src/ArvoAcquisitionEscrow.sol";
 import { MockERC20 } from "../../src/mocks/MockERC20.sol";
+import { MockArvoPriceOracle } from "../../src/mocks/MockArvoPriceOracle.sol";
 import { ArvoSharedBonus, IArvoStakingBonusView } from "../../src/bonus/ArvoSharedBonus.sol";
 
 contract ArvoSharedBonusReviewTest is BonusFixture {
@@ -102,19 +103,92 @@ contract ArvoSharedBonusReviewTest is BonusFixture {
         vm.expectRevert(ArvoSharedBonus.NothingToReturn.selector);
         bonus.returnToTreasury();
     }
-    /// Review L-2: pools with dual or cross-asset products are rejected.
-    function testRejectsDualAndCrossAssetPools() public {
+    /// Review L-2 (revised): dual and USDC-deposit pools are still rejected.
+    /// ARVO-deposit pools paying a USDC base reward are now accepted (below).
+    function testRejectsDualAndUsdcDepositPools() public {
         vm.startPrank(admin);
         uint32 dual = staking.createProductPool(T.VaultKind.CUSTOM, _config(), opensAt, closesAt, CAP, 1_000_000e6, 1 | 8, 0);
         T.VaultConfig memory c = _config();
         c.usdcRewardBps = 500;
-        uint32 cross = staking.createProductPool(T.VaultKind.CUSTOM, c, opensAt, closesAt, CAP, 0, 1 | 2, MIN);
+        uint32 usdcOnly = staking.createProductPool(T.VaultKind.CUSTOM, c, opensAt, closesAt, 0, 1_000_000e6, 4, 0);
         vm.stopPrank();
         IArvoStakingBonusView s_ = IArvoStakingBonusView(address(staking));
         vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
         new ArvoSharedBonus(s_, dual, POT, treasury, GRACE);
         vm.expectRevert(ArvoSharedBonus.InvalidConfiguration.selector);
-        new ArvoSharedBonus(s_, cross, POT, treasury, GRACE);
+        new ArvoSharedBonus(s_, usdcOnly, POT, treasury, GRACE);
+    }
+
+    /// Creates an ARVO-deposit pool with the given products (2 = ARVO->USDC,
+    /// 1|2 = both), funded for USDC base rewards, with a mock price feed.
+    function _crossPool(uint8 products) internal returns (uint32 id, ArvoSharedBonus b) {
+        MockArvoPriceOracle oracle = new MockArvoPriceOracle(1e6, 6); // 1 ARVO = $1 keeps maths readable
+        T.VaultConfig memory c = _config();
+        c.usdcRewardBps = 500;
+        usdc.mint(admin, 10_000_000e6);
+        vm.startPrank(admin);
+        staking.configurePriceOracle(address(oracle), 1 days);
+        usdc.approve(address(staking), type(uint256).max);
+        staking.fundUsdcRewards(10_000_000e6);
+        id = staking.createProductPool(T.VaultKind.CUSTOM, c, opensAt, closesAt, CAP, 0, products, MIN);
+        staking.reservePoolRewardBudget(id, 0, 10_000_000e6);
+        if (products & 1 != 0) {
+            arvo.mint(admin, BASE_BUDGET);
+            staking.fundArvoRewards(BASE_BUDGET);
+            staking.reservePoolRewardBudget(id, BASE_BUDGET, 0);
+        }
+        vm.stopPrank();
+        b = new ArvoSharedBonus(IArvoStakingBonusView(address(staking)), id, POT, treasury, GRACE);
+        arvo.mint(address(b), POT);
+    }
+
+    function _stakeForUsdc(uint32 id, address u, uint256 amt) internal returns (uint256 pos) {
+        arvo.mint(u, amt);
+        vm.startPrank(u); arvo.approve(address(staking), amt);
+        pos = staking.stakeArvoForUsdc(id, amt, 1);
+        vm.stopPrank();
+    }
+
+    /// ARVO in, USDC base reward out: the ARVO bonus pot is shared by ARVO principal.
+    function testArvoForUsdcPoolSharesPotByArvoPrincipal() public {
+        (uint32 id, ArvoSharedBonus b) = _crossPool(2);
+        vm.warp(opensAt);
+        uint256 a = _stakeForUsdc(id, alice, 1_000_000 ether);
+        uint256 c = _stakeForUsdc(id, carol, 3_000_000 ether);
+        assertGt(staking.position(a).usdcReward, 0);
+        assertEq(staking.position(a).arvoReward, 0);
+        vm.warp(closesAt);
+        b.snapshot();
+        assertEq(b.totalEligible(), 4_000_000 ether);
+        vm.warp(closesAt + DURATION);
+        uint256 paidA = b.claim(a);
+        uint256 paidC = b.claim(c);
+        assertEq(paidA, POT / 4);
+        assertEq(paidC, POT * 3 / 4);
+        assertEq(arvo.balanceOf(alice), paidA); // bonus is paid in ARVO to the owner
+        assertLe(paidA + paidC, POT);
+        // Base USDC reward and principal are untouched by the bonus.
+        vm.prank(alice); staking.claim(a);
+        assertEq(arvo.balanceOf(alice), paidA + 1_000_000 ether);
+        assertGt(usdc.balanceOf(alice), 0);
+    }
+
+    /// A pool offering both ARVO->ARVO and ARVO->USDC shares one pot across both.
+    function testMixedArvoProductsShareOnePot() public {
+        (uint32 id, ArvoSharedBonus b) = _crossPool(1 | 2);
+        vm.warp(opensAt);
+        uint256 a = _stakeIn(id, alice, 2_000_000 ether);          // ARVO -> ARVO
+        uint256 c = _stakeForUsdc(id, carol, 2_000_000 ether);     // ARVO -> USDC
+        uint256 e = _stakeForUsdc(id, address(0xEE), 1_000_000 ether);
+        _emergencyExit(address(0xEE), e);                          // forfeits, and leaves the total
+        vm.warp(closesAt);
+        b.snapshot();
+        assertEq(b.totalEligible(), 4_000_000 ether);
+        vm.warp(closesAt + DURATION);
+        assertEq(b.claim(a), POT / 2);
+        assertEq(b.claim(c), POT / 2);
+        vm.expectRevert(ArvoSharedBonus.EmergencyExited.selector); b.claim(e);
+        assertEq(b.totalClaimed(), POT);
     }
 
     /// Review L-1: the snapshot window must be at least one day.
