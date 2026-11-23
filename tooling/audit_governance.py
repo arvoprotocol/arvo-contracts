@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import subprocess
+import urllib.error
 import urllib.request
 
 ZERO = '0x' + '00' * 20
@@ -50,9 +51,19 @@ class RPC:
         self.url = url
     def __call__(self, method, params):
         payload = json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode()
-        request = urllib.request.Request(self.url, data=payload, headers={'Content-Type':'application/json'})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.load(response)
+        # Some public RPCs (behind Cloudflare) refuse Python's default User-Agent with HTTP 403.
+        request = urllib.request.Request(self.url, data=payload, headers={'Content-Type':'application/json','Accept':'application/json','User-Agent':'arvo-governance-audit/1.0'})
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    result = json.load(response)
+                break
+            except urllib.error.HTTPError as error:
+                # Rate limited: wait and retry. Report only the status code, never the URL (it may hold a key).
+                if error.code == 429 and attempt < 3:
+                    __import__('time').sleep(2 ** attempt)
+                    continue
+                raise AuditError('RPC returned HTTP %d for %s' % (error.code, method)) from None
         require('error' not in result and 'result' in result, 'RPC operation failed: ' + method)
         return result['result']
 
