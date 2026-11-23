@@ -19,11 +19,12 @@ class AuditTests(unittest.TestCase):
             self.c[field]=hash_value('0x6000')
         self.staking={ '0x'+'00'*32:{addr(14),addr(11)},hash_value('UPGRADER_ROLE'):{addr(14),addr(11)},hash_value('VAULT_MANAGER_ROLE'):{addr(12),addr(11)},hash_value('REWARD_MANAGER_ROLE'):{addr(12),addr(11)},hash_value('PAUSER_ROLE'):{addr(13),addr(11)}}
         self.timelock={'0x'+'00'*32:{addr(14)},hash_value('PROPOSER_ROLE'):{addr(12)},hash_value('CANCELLER_ROLE'):{addr(12)},hash_value('EXECUTOR_ROLE'):{addr(12)}}
-        self.empty_safe=False;self.modules=[];self.guard=gate.ZERO;self.revoked=[];self.chain=31337
+        self.receipts={};self.empty_safe=False;self.modules=[];self.guard=gate.ZERO;self.revoked=[];self.chain=31337
     def rpc(self,method,params):
         if method=='eth_chainId':return hex(self.chain)
         if method=='eth_blockNumber':return '0x80'
         if method=='eth_getBlockByNumber':return {'hash':'0x'+'ab'*32}
+        if method=='eth_getTransactionReceipt':return self.receipts.get(params[0])
         if method=='eth_getCode':return '0x' if self.empty_safe and params[0]==addr(12) else '0x6000'
         if method=='eth_getStorageAt':
             target,slot,_=params
@@ -55,6 +56,13 @@ class AuditTests(unittest.TestCase):
     def fails(self):
         with self.assertRaises(gate.AuditError):self.passes()
     def test_valid_staged(self):self.passes()
+    def test_verified_deployment_tx_starts_scan(self):
+        tx='0x'+'aa'*32;self.receipts[tx]={'status':'0x1','contractAddress':addr(10),'blockNumber':'0x1'};self.c['stakingProxyDeploymentTx']=tx;self.passes()
+    def test_deployment_tx_for_other_contract_rejected(self):
+        tx='0x'+'aa'*32;self.receipts[tx]={'status':'0x1','contractAddress':addr(99),'blockNumber':'0x1'};self.c['stakingProxyDeploymentTx']=tx;self.fails()
+    def test_failed_deployment_tx_rejected(self):
+        tx='0x'+'aa'*32;self.receipts[tx]={'status':'0x0','contractAddress':addr(14),'blockNumber':'0x1'};self.c['timelockDeploymentTx']=tx;self.fails()
+    def test_missing_deployment_tx_rejected(self):self.c['timelockDeploymentTx']='0x'+'bb'*32;self.fails()
     def test_valid_final(self):
         for holders in self.staking.values():holders.discard(addr(11))
         self.passes('final')

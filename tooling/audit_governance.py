@@ -100,10 +100,24 @@ def audit(config, rpc, phase):
     require(call(timelock,'getMinDelay()')[0] == config['timelockDelay'], 'Timelock delay mismatch')
     granted = keccak('RoleGranted(bytes32,address,address)')
     revoked = keccak('RoleRevoked(bytes32,address,address)')
-    def roles(target, expected):
-        # Scan from genesis, not a user-supplied start that could omit grants.
+    def first_block(target, tx_field):
+        # A contract cannot emit events before it exists. If the manifest names the transaction that
+        # created the contract, start at that block, but only after checking on chain that this
+        # transaction succeeded and created exactly this address. Otherwise scan from genesis.
+        tx = config.get(tx_field)
+        if not tx:
+            return 0
+        require(isinstance(tx, str) and len(tx) == 66 and tx.startswith('0x'), 'Invalid deployment transaction hash')
+        receipt = rpc('eth_getTransactionReceipt', [tx])
+        require(isinstance(receipt, dict) and receipt.get('status') == '0x1', 'Deployment transaction not found or failed')
+        require(address(receipt.get('contractAddress') or ZERO) == target, 'Deployment transaction did not create '+target)
+        start = int(receipt['blockNumber'], 16)
+        require(start <= height, 'Deployment block is after the audited block')
+        return start
+    def roles(target, expected, tx_field):
+        # Scan from the verified creation block (or genesis), never an unverified start that could omit grants.
         observed = {}
-        for start in range(0,height+1,2000):
+        for start in range(first_block(target, tx_field),height+1,2000):
             logs = rpc('eth_getLogs',[{'address':target,'fromBlock':hex(start),'toBlock':hex(min(height,start+1999)), 'topics':[[granted,revoked]]}])
             logs.sort(key=lambda entry:(int(entry['blockNumber'],16),int(entry['logIndex'],16)))
             for event in logs:
@@ -126,8 +140,8 @@ def audit(config, rpc, phase):
     if phase=='staged':
         for holders in staking_roles.values():
             holders.add(admin)
-    roles(staking,staking_roles)
-    roles(timelock,{default:{timelock},keccak('PROPOSER_ROLE'):{safe},keccak('CANCELLER_ROLE'):{safe},keccak('EXECUTOR_ROLE'):{safe}})
+    roles(staking,staking_roles,'stakingProxyDeploymentTx')
+    roles(timelock,{default:{timelock},keccak('PROPOSER_ROLE'):{safe},keccak('CANCELLER_ROLE'):{safe},keccak('EXECUTOR_ROLE'):{safe}},'timelockDeploymentTx')
     require(rpc('eth_getBlockByNumber',[block,False])['hash'] == header['hash'], 'Chain reorganized during audit; rerun')
     return [int(staking,16),int(admin,16),int(safe,16),int(emergency,16),int(timelock,16),config['timelockDelay'],chain]
 
